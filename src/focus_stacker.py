@@ -18,65 +18,43 @@ laplace_kernel = cp.array([[0, 1, 0],
                           [1, -4, 1],
                           [0, 1, 0]], dtype=cp.float32)
 
+# Milder sharpening kernel to avoid darkening
+sharp_kernel = cp.array([[-0.5,-0.5,-0.5],
+                        [-0.5, 5,-0.5],
+                        [-0.5,-0.5,-0.5]], dtype=cp.float32)
+
 class FocusStacker:
-    """
-    @class FocusStacker
-    @brief Implements focus stacking algorithm to combine multiple images
-    """
-    
     def __init__(self, radius=8, smoothing=4):
-        """
-        Initialize focus stacker with parameters
-        @param radius Size of area around each pixel for focus detection (1-20)
-        @param smoothing Amount of smoothing for transitions (1-10)
-        """
         if not 1 <= radius <= 20:
             raise ValueError("Radius must be between 1 and 20")
         if not 1 <= smoothing <= 10:
             raise ValueError("Smoothing must be between 1 and 10")
             
-        # Store parameters
-        self.radius = radius  # Used for focus measure window
-        self.smoothing = smoothing  # Used for transitions
-        
-        # Derived parameters
-        self.window_size = 2 * radius + 1  # Window size for focus measure
-        
-        # Color profiles
+        self.radius = radius
+        self.smoothing = smoothing
+        self.window_size = 2 * radius + 1
         self._init_color_profiles()
 
     def _init_color_profiles(self):
-        """Initialize color profile transformations"""
         self.color_profiles = {
             'sRGB': PIL.ImageCms.createProfile('sRGB')
         }
 
     def _load_image(self, path):
-        """
-        Load image and convert to float32
-        @param path Path to image file
-        @return Loaded image as float32 array
-        """
         img = cv2.imread(path, cv2.IMREAD_COLOR)
         if img is None:
             raise ValueError(f"Failed to load image: {path}")
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255
 
     def _align_images(self, images):
-        """
-        Align images using GPU-accelerated phase correlation
-        @param images List of aligned images
-        @return List of aligned images
-        """
         print("\nAligning images using GPU...")
         reference = images[0]
         aligned = [reference]
         
-        # Convert reference to grayscale and upload to GPU
         ref_gray = cv2.cvtColor((reference * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
         gpu_ref = cp.asarray(ref_gray.astype(np.float32))
         
-        # Apply CLAHE on GPU
+        # Enhanced CLAHE for better feature detection
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         gpu_ref = cp.asarray(clahe.apply(ref_gray))
         
@@ -84,12 +62,11 @@ class FocusStacker:
             print(f"Aligning image {i+1} with reference...")
             
             try:
-                # Convert to grayscale and normalize
                 img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
                 img_gray = cv2.normalize(img_gray, None, 0, 255, cv2.NORM_MINMAX)
                 
-                # Multi-scale alignment
-                scales = [1.0, 0.5, 0.25]  # Try different scales
+                # Multi-scale alignment with refined error metrics
+                scales = [1.0, 0.5, 0.25]
                 best_shift = None
                 best_error = float('inf')
                 
@@ -103,26 +80,21 @@ class FocusStacker:
                         scaled_ref = ref_gray
                         scaled_img = img_gray
                     
-                    # Apply CLAHE for better contrast
                     scaled_ref = clahe.apply(scaled_ref)
                     scaled_img = clahe.apply(scaled_img)
                     
-                    # Upload to GPU
                     gpu_scaled_ref = cp.asarray(scaled_ref.astype(np.float32))
                     gpu_scaled_img = cp.asarray(scaled_img.astype(np.float32))
                     
-                    # Compute phase correlation
                     shift, error, _ = phase_cross_correlation(
                         gpu_scaled_ref.get(),
                         gpu_scaled_img.get(),
                         upsample_factor=10
                     )
                     
-                    # Scale shift back to original size
                     if scale != 1.0:
                         shift = shift / scale
                     
-                    # Calculate normalized cross-correlation as error metric
                     shifted_img = cv2.warpAffine(
                         img_gray, 
                         np.float32([[1, 0, -shift[1]], [0, 1, -shift[0]]]),
@@ -131,12 +103,11 @@ class FocusStacker:
                         borderMode=cv2.BORDER_REFLECT
                     )
                     
-                    # Compute correlation coefficient
                     error = -cv2.matchTemplate(
                         ref_gray, 
                         shifted_img, 
                         cv2.TM_CCOEFF_NORMED
-                    )[0][0]  # Negative because we want to minimize
+                    )[0][0]
                     
                     if error < best_error:
                         best_error = error
@@ -146,17 +117,13 @@ class FocusStacker:
                 error = best_error
                 print(f"Detected shift: {shift}, error: {error}")
                 
-                # Create translation matrix
                 M = np.float32([[1, 0, -shift[1]], [0, 1, -shift[0]]])
-                
-                # Apply transformation with border reflection
                 aligned_img = cv2.warpAffine(
                     img, M, (img.shape[1], img.shape[0]),
                     flags=cv2.INTER_LINEAR,
                     borderMode=cv2.BORDER_REFLECT
                 )
                 
-                # Refine alignment using ECC if error is above threshold
                 if error > 0.1:
                     try:
                         warp_matrix = np.eye(2, 3, dtype=np.float32)
@@ -183,116 +150,133 @@ class FocusStacker:
                 print("Using original image as fallback")
                 aligned.append(img)
         
-        print("Alignment complete")
         return aligned
 
     def _focus_measure(self, img):
-        """
-        Calculate focus measure using enhanced Laplacian and local variance
-        @param img Input image
-        @return Focus measure map
-        """
         if len(img.shape) == 3:
             img = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
         else:
             img = (img * 255).astype(np.uint8)
             
-        # Milder CLAHE for better contrast while preserving lighting
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        img_clahe = clahe.apply(img)
-        # Use CLAHE only for focus detection, not the actual image
-        img_for_focus = img_clahe
+        # Multi-scale focus detection
+        gpu_img = cp.asarray(img.astype(np.float32))
+        
+        # Compute focus at multiple scales
+        scales = [1.0, 0.5]
+        focus_maps = []
+        
+        for scale in scales:
+            if scale != 1.0:
+                scaled_img = cv2.resize(img, None, fx=scale, fy=scale)
+                gpu_scaled = cp.asarray(scaled_img.astype(np.float32))
+            else:
+                gpu_scaled = gpu_img
             
-        # Upload focus detection image to GPU
-        gpu_img = cp.asarray(img_for_focus.astype(np.float32))
+            # Edge detection using Laplacian
+            laplacian = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
+                cp.fft.fft2(gpu_scaled) * cp.fft.fft2(laplace_kernel, s=gpu_scaled.shape)
+            ))))
+            
+            # Local contrast using gradient magnitude
+            dx = cp.gradient(gpu_scaled, axis=1)
+            dy = cp.gradient(gpu_scaled, axis=0)
+            gradient_mag = cp.sqrt(dx**2 + dy**2)
+            
+            # Combine edge and contrast information
+            focus_map = laplacian * cp.sqrt(gradient_mag)
+            
+            if scale != 1.0:
+                focus_map = cp.asarray(cv2.resize(
+                    cp.asnumpy(focus_map), 
+                    (img.shape[1], img.shape[0])
+                ))
+            
+            focus_maps.append(focus_map)
         
-        # Multi-scale Laplacian for better detail detection
-        laplacian_small = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(cp.fft.fft2(gpu_img) * cp.fft.fft2(laplace_kernel, s=gpu_img.shape)))))
+        # Combine multi-scale focus maps
+        final_focus = cp.maximum(focus_maps[0], focus_maps[1])
         
-        # Calculate local variance (sensitive to texture details)
-        mean = cp.average(gpu_img)
-        variance = cp.abs(gpu_img - mean) ** 2
+        # Normalize with contrast-aware enhancement
+        focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
+        focus_map = cp.power(focus_map, 0.75)  # Moderate contrast enhancement
         
-        # Combine Laplacian and variance with more emphasis on Laplacian
-        focus_map = laplacian_small * cp.sqrt(variance)
-        
-        # Normalize with moderate non-linear enhancement
-        focus_map = (focus_map - cp.min(focus_map)) / (cp.max(focus_map) - cp.min(focus_map))
-        focus_map = cp.power(focus_map, 0.6)  # Moderate boost to sharp regions
-        
-        # Download result from GPU
-        focus_map = cp.asnumpy(focus_map)
-        
-        return focus_map.astype(np.float32)
+        return cp.asnumpy(focus_map).astype(np.float32)
 
     def _blend_images(self, aligned_images, focus_maps):
-        """
-        Blend images using enhanced weighted average method with sharpening
-        @param aligned_images List of aligned images
-        @param focus_maps List of focus measure maps
-        @return Blended image
-        """
-        # Upload data to GPU
         gpu_aligned = cp.array([cp.asarray(img) for img in aligned_images])
         gpu_focus = cp.array([cp.asarray(fm) for fm in focus_maps])
         
-        # Apply milder Gaussian smoothing to focus maps
-        sigma = 0.5  # Reduced smoothing to preserve detail boundaries
+        # Edge-aware smoothing of focus maps
+        sigma = 0.5
         for i in range(len(focus_maps)):
             gpu_focus[i] = cp.asarray(gaussian(cp.asnumpy(gpu_focus[i]), sigma=sigma))
         
-        # Enhanced weight normalization with local max pooling
+        # Normalize focus maps individually first
+        for i in range(len(focus_maps)):
+            fm = gpu_focus[i]
+            fm_min = cp.min(fm)
+            fm_max = cp.max(fm)
+            if fm_max > fm_min:
+                gpu_focus[i] = (fm - fm_min) / (fm_max - fm_min)
+        
+        # Compute weights with better normalization
         weights_sum = cp.sum(gpu_focus, axis=0, keepdims=True)
-        max_weights = cp.max(gpu_focus, axis=0, keepdims=True)
         weights = cp.where(weights_sum > 0, 
-                         (gpu_focus * max_weights) / (weights_sum + 1e-10),
+                         gpu_focus / (weights_sum + 1e-10),
                          1.0 / len(focus_maps))
         
-        # Expand weights for broadcasting
-        weights = weights[..., None]
+        # Ensure weights sum to 1 exactly
+        weights_sum = cp.sum(weights, axis=0, keepdims=True)
+        weights = weights / (weights_sum + 1e-10)
         
-        # Blend images
+        weights = weights[..., None]
         result = cp.sum(gpu_aligned * weights, axis=0)
         
-        # Milder sharpening on GPU
-        kernel = cp.array([[-0.5,-0.5,-0.5], [-0.5,5,-0.5], [-0.5,-0.5,-0.5]], dtype=cp.float32)
-        result_sharp = cp.zeros_like(result)
+        # Calculate and preserve average brightness
+        input_brightness = float(cp.mean(gpu_aligned))
+        result_brightness = float(cp.mean(result))
+        print(f"Input brightness: {input_brightness:.3f}")
+        print(f"Initial result brightness: {result_brightness:.3f}")
         
-        # Apply gentler sharpening per channel
+        if result_brightness > 0:
+            scale_factor = input_brightness / result_brightness
+            result = result * scale_factor
+            print(f"Applied brightness scale factor: {scale_factor:.3f}")
+            print(f"Final result brightness: {float(cp.mean(result)):.3f}")
+        
+        # Apply milder sharpening
+        result_sharp = cp.zeros_like(result)
         for c in range(3):
             result_sharp[...,c] = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result[...,c]) * cp.fft.fft2(kernel, s=result[...,c].shape)
+                cp.fft.fft2(result[...,c]) * cp.fft.fft2(sharp_kernel, s=result[...,c].shape)
             ))
         
-        # Blend original and sharpened with less intensity
-        alpha = 0.4  # Reduced sharpening strength
+        # Blend sharpened result with brightness preservation
+        alpha = 0.2  # Reduced sharpening strength
         result = (1 - alpha) * result + alpha * result_sharp
         
-        # Download result from GPU
-        result = cp.asnumpy(result)
+        # Ensure we maintain original brightness range
+        result_np = cp.asnumpy(result)
+        for c in range(3):
+            min_val = result_np[..., c].min()
+            max_val = result_np[..., c].max()
+            if max_val > min_val:
+                result_np[..., c] = (result_np[..., c] - min_val) / (max_val - min_val)
         
-        return np.clip(result, 0, 1)
+        return np.clip(result_np, 0, 1)
 
     def split_into_stacks(self, image_paths, stack_size):
-        """
-        Split images into stacks based on filename patterns
-        @param image_paths List of paths to input images
-        @param stack_size Number of images per stack
-        @return List of lists containing paths for each stack
-        """
         import re
         
-        # Group files by their base name using multiple patterns
         stacks_dict = {}
         for path in image_paths:
             filename = os.path.basename(path)
             name, ext = os.path.splitext(filename)
             
-            # Try different patterns to extract base name and number
             patterns = [
-                r'^(.*?)[-_]?(\d+)$',  # name-123 or name_123 or name123
-                r'^(.*?)[-_]?(\d+)[-_]',  # name-123-suffix or name_123_suffix
-                r'(\d+)[-_]?(.*?)$'  # 123-name or 123_name
+                r'^(.*?)[-_]?(\d+)$',
+                r'^(.*?)[-_]?(\d+)[-_]',
+                r'(\d+)[-_]?(.*?)$'
             ]
             
             matched = False
@@ -314,21 +298,17 @@ class FocusStacker:
                     stacks_dict[base_name] = []
                 stacks_dict[base_name].append(path)
             
-        # Sort files within each stack
         for base_name in stacks_dict:
             stacks_dict[base_name].sort()
             
-        # Convert dictionary to list of stacks
         stacks = list(stacks_dict.values())
         
-        # Verify stack sizes
         expected_size = stack_size
         for i, stack in enumerate(stacks):
             if len(stack) != expected_size:
                 print(f"Warning: Stack {i+1} has {len(stack)} images, expected {expected_size}")
                 print(f"Stack contents: {[os.path.basename(p) for p in stack]}")
                 
-        # Sort stacks by first filename to maintain consistent order
         stacks.sort(key=lambda x: x[0])
         
         print("\nDetected stacks:")
@@ -338,20 +318,12 @@ class FocusStacker:
         return stacks
 
     def process_stack(self, image_paths, color_space='sRGB'):
-        """
-        Process a stack of images
-        @param image_paths List of paths to input images
-        @param color_space Target color space
-        @param progress_callback Optional callback for progress updates
-        @return Processed image
-        """
         if len(image_paths) < 2:
             raise ValueError("At least 2 images are required")
             
         print(f"\nProcessing stack of {len(image_paths)} images...")
         print("Image paths:", image_paths)
             
-        # Load images
         images = []
         for i, path in enumerate(image_paths):
             print(f"Loading image {i+1}/{len(image_paths)}: {path}")
@@ -363,7 +335,6 @@ class FocusStacker:
                 print(f"Error loading image {path}: {str(e)}")
                 raise
                 
-        # Align images
         print("\nAligning images...")
         try:
             aligned = self._align_images(images)
@@ -372,7 +343,6 @@ class FocusStacker:
             print(f"Error during image alignment: {str(e)}")
             raise
             
-        # Calculate focus measures
         print("\nCalculating focus measures...")
         focus_maps = []
         for i, img in enumerate(aligned):
@@ -385,7 +355,6 @@ class FocusStacker:
                 print(f"Error calculating focus measure for image {i+1}: {str(e)}")
                 raise
                 
-        # Blend images
         print("\nBlending images...")
         try:
             result = self._blend_images(aligned, focus_maps)
@@ -394,7 +363,6 @@ class FocusStacker:
             print(f"Error during image blending: {str(e)}")
             raise
             
-        # Convert to target color space
         if color_space != 'sRGB':
             print(f"\nConverting to {color_space} color space...")
             try:
@@ -408,43 +376,24 @@ class FocusStacker:
         return result
 
     def _convert_color_space(self, img, target_space):
-        """
-        Convert image to target color space
-        @param img Input image
-        @param target_space Target color space name
-        @return Converted image
-        """
-        # Convert numpy array to PIL Image
         pil_img = PIL.Image.fromarray((img * 255).astype('uint8'))
         
-        # Create transform
         source_profile = self.color_profiles['sRGB']
         target_profile = self.color_profiles[target_space]
         transform = PIL.ImageCms.buildTransformFromOpenProfiles(
             source_profile, target_profile, "RGB", "RGB")
         
-        # Apply transform
         converted = PIL.ImageCms.applyTransform(pil_img, transform)
         
-        # Convert back to numpy array
         return np.array(converted).astype(np.float32) / 255
 
     def save_image(self, img, path, format_name='JPEG', color_space='sRGB'):
-        """
-        Save processed image
-        @param img Image to save
-        @param path Output path
-        @param format_name Output format (currently only JPEG supported)
-        @param color_space Color space
-        """
         print(f"\nSaving image as JPEG...")
         print(f"Path: {path}")
         
         try:
-            # Convert to 8-bit with careful rounding
             img_8bit = np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8)
             
-            # Save as high-quality JPEG
             pil_img = PIL.Image.fromarray(img_8bit, mode='RGB')
             pil_img.save(path, format='JPEG', quality=95, optimize=True)
             print(f"Successfully saved image to {path}")
