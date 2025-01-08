@@ -375,16 +375,25 @@ class FocusStacker:
         # Normalize result
         result = result / (weights_sum + 1e-10)
         
-        # Calculate input statistics from first image for reference
+        # Calculate input statistics and preserve original brightness characteristics
         ref_img = cp.asarray(aligned_images[0])
         input_mean = float(cp.mean(ref_img))
         input_std = float(cp.std(ref_img))
-        del ref_img
+        max_ref = float(cp.max(ref_img))
         
-        # Normalize result to match input distribution
+        # Normalize result while preserving original characteristics
         result_mean = float(cp.mean(result))
         result_std = float(cp.std(result))
-        result = (result - result_mean) * (input_std / result_std) + input_mean
+        # Use a stronger blend factor to stay closer to original brightness
+        blend_factor = 0.95  # 95% of original brightness, 5% normalized
+        # Apply gentler normalization
+        normalized = ((result - result_mean) * (input_std / (result_std + 1e-6)) + input_mean)
+        result = result * blend_factor + normalized * (1 - blend_factor)
+        # Additional brightness correction to prevent overshooting
+        result = cp.clip(result, 0.0, max_ref)
+        
+        # Clean up reference image
+        del ref_img
         
         # Debug sharpening mask dimensions
         print(f"\nSharpening mask calculation:")
@@ -410,42 +419,29 @@ class FocusStacker:
         focus_mask /= len(focus_maps)
         focus_mask = cp.clip(focus_mask, 0.3, 1.0)
         
-        # Process sharpening in chunks to save memory
-        chunk_size = 512  # Process in 512-pixel vertical strips
-        width = result.shape[1]
-        num_chunks = (width + chunk_size - 1) // chunk_size
-        
-        for chunk_idx in range(num_chunks):
-            start_x = chunk_idx * chunk_size
-            end_x = min(start_x + chunk_size, width)
+        # Apply sharpening to full image at once
+        sharp_result = cp.zeros_like(result)
+        for c in range(3):
+            # Basic sharpening
+            sharp = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result[...,c]) * cp.fft.fft2(sharp_kernel, s=result[...,c].shape)
+            ))
             
-            # Extract chunk
-            chunk = result[:, start_x:end_x]
-            chunk_mask = focus_mask[:, start_x:end_x]
+            # High-frequency enhancement
+            high_freq = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result[...,c]) * cp.fft.fft2(highfreq_kernel, s=result[...,c].shape)
+            ))
             
-            # Apply sharpening to chunk
-            sharp_chunk = cp.zeros_like(chunk)
-            for c in range(3):
-                # Basic sharpening
-                sharp = cp.real(cp.fft.ifft2(
-                    cp.fft.fft2(chunk[...,c]) * cp.fft.fft2(sharp_kernel, s=chunk[...,c].shape)
-                ))
-                
-                # High-frequency enhancement
-                high_freq = cp.real(cp.fft.ifft2(
-                    cp.fft.fft2(chunk[...,c]) * cp.fft.fft2(highfreq_kernel, s=chunk[...,c].shape)
-                ))
-                
-                # Combine enhancements
-                sharp_strength = cp.clip(chunk_mask * 1.2, 0.7, 0.95)
-                sharp_chunk[...,c] = chunk[...,c] + sharp * sharp_strength + high_freq * 0.3
+            # Combine enhancements
+            sharp_strength = cp.clip(focus_mask * 1.2, 0.7, 0.95)
+            sharp_result[...,c] = result[...,c] + sharp * sharp_strength + high_freq * 0.3
             
-            # Update result chunk
-            result[:, start_x:end_x] = sharp_chunk
-            
-            # Clear chunk data
-            del chunk, chunk_mask, sharp_chunk
+            # Clear intermediate results
+            del sharp, high_freq
             cp.get_default_memory_pool().free_all_blocks()
+        
+        result = sharp_result
+        del sharp_result
         
         # Convert back to CPU and downscale if needed
         if self.scale_factor > 1:
@@ -584,16 +580,30 @@ class FocusStacker:
         converted = PIL.ImageCms.applyTransform(pil_img, transform)
         
         return np.array(converted).astype(np.float32) / 255
-
-    def save_image(self, img, path, format_name='JPEG', color_space='sRGB'):
-        print(f"\nSaving image as JPEG...")
+    def save_image(self, img, path, format='JPEG', color_space='sRGB'):
+        """
+        Save the processed image to a file
+        @param img: The image array to save
+        @param path: Output file path
+        @param format: Image format (JPEG)
+        @param color_space: Color space to use (sRGB)
+        """
+        print(f"\nSaving image as {format}...")
         print(f"Path: {path}")
         
         try:
+            # Convert to 8-bit with proper rounding
             img_8bit = np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8)
             
+            # Create PIL image
             pil_img = PIL.Image.fromarray(img_8bit, mode='RGB')
-            pil_img.save(path, format='JPEG', quality=95, optimize=True)
+            
+            # Save with format-specific settings
+            if format.upper() == 'JPEG':
+                pil_img.save(path, format='JPEG', quality=95, optimize=True)
+            else:
+                raise ValueError(f"Unsupported format: {format}")
+                
             print(f"Successfully saved image to {path}")
             
         except Exception as e:
