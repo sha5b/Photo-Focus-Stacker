@@ -18,25 +18,44 @@ laplace_kernel = cp.array([[0, 1, 0],
                           [1, -4, 1],
                           [0, 1, 0]], dtype=cp.float32)
 
-# Aggressive sharpening kernel optimized for photogrammetry
-sharp_kernel = cp.array([[-1,-1,-1],
-                        [-1, 9,-1],
-                        [-1,-1,-1]], dtype=cp.float32)
+# Ultra-sharp kernel optimized for photogrammetry micro-detail
+sharp_kernel = cp.array([[-3,-3,-3],
+                        [-3, 25,-3],
+                        [-3,-3,-3]], dtype=cp.float32)
 
-# High-frequency enhancement kernel
-highfreq_kernel = cp.array([[-1,-1,-1],
-                          [-1, 8,-1],
-                          [-1,-1,-1]], dtype=cp.float32)
+# Enhanced high-frequency kernel for maximum detail recovery
+highfreq_kernel = cp.array([[-3,-3,-3],
+                          [-3, 24,-3],
+                          [-3,-3,-3]], dtype=cp.float32)
+
+# Edge enhancement kernel with stronger center weight
+edge_kernel = cp.array([[-2,-2,-2,-2,-2],
+                       [-2, 3, 3, 3,-2],
+                       [-2, 3, 12, 3,-2],
+                       [-2, 3, 3, 3,-2],
+                       [-2,-2,-2,-2,-2]], dtype=cp.float32)
 
 class FocusStacker:
-    def __init__(self, radius=8, smoothing=4):
+    def __init__(self, radius=8, smoothing=4, scale_factor=2):
+        """
+        @param radius: Size of the focus measure window (1-20)
+        @param smoothing: Amount of smoothing applied to focus maps (1-10)
+        @param scale_factor: Processing scale multiplier (1-4). Higher values may improve detail but increase processing time.
+                           1 = original resolution
+                           2 = 2x upscaling (default, recommended)
+                           3 = 3x upscaling (more detail, slower)
+                           4 = 4x upscaling (maximum detail, much slower)
+        """
         if not 1 <= radius <= 20:
             raise ValueError("Radius must be between 1 and 20")
         if not 1 <= smoothing <= 10:
             raise ValueError("Smoothing must be between 1 and 10")
+        if not 1 <= scale_factor <= 4:
+            raise ValueError("Scale factor must be between 1 and 4")
             
         self.radius = radius
         self.smoothing = smoothing
+        self.scale_factor = scale_factor
         self.window_size = 2 * radius + 1
         self._init_color_profiles()
 
@@ -59,9 +78,9 @@ class FocusStacker:
         ref_gray = cv2.cvtColor((reference * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
         gpu_ref = cp.asarray(ref_gray.astype(np.float32))
         
-        # Enhanced CLAHE for better feature detection
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-        gpu_ref = cp.asarray(clahe.apply(ref_gray))
+        # Convert to GPU and normalize
+        gpu_ref = cp.asarray(ref_gray.astype(np.float32))
+        gpu_ref = (gpu_ref - cp.min(gpu_ref)) / (cp.max(gpu_ref) - cp.min(gpu_ref))
         
         for i, img in enumerate(images[1:], 1):
             print(f"Aligning image {i+1} with reference...")
@@ -70,8 +89,8 @@ class FocusStacker:
                 img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
                 img_gray = cv2.normalize(img_gray, None, 0, 255, cv2.NORM_MINMAX)
                 
-                # Multi-scale alignment with refined error metrics
-                scales = [1.0, 0.5, 0.25]
+                # Enhanced multi-scale alignment with finer scale steps
+                scales = [1.0, 0.8, 0.6, 0.4, 0.2]  # More granular scale steps
                 best_shift = None
                 best_error = float('inf')
                 
@@ -85,16 +104,19 @@ class FocusStacker:
                         scaled_ref = ref_gray
                         scaled_img = img_gray
                     
-                    scaled_ref = clahe.apply(scaled_ref)
-                    scaled_img = clahe.apply(scaled_img)
-                    
+                    # Convert to GPU arrays first
                     gpu_scaled_ref = cp.asarray(scaled_ref.astype(np.float32))
                     gpu_scaled_img = cp.asarray(scaled_img.astype(np.float32))
                     
+                    # Apply contrast enhancement directly on GPU
+                    gpu_scaled_ref = (gpu_scaled_ref - cp.min(gpu_scaled_ref)) / (cp.max(gpu_scaled_ref) - cp.min(gpu_scaled_ref))
+                    gpu_scaled_img = (gpu_scaled_img - cp.min(gpu_scaled_img)) / (cp.max(gpu_scaled_img) - cp.min(gpu_scaled_img))
+                    
+                    # Enhanced phase correlation with higher upsampling
                     shift, error, _ = phase_cross_correlation(
                         gpu_scaled_ref.get(),
                         gpu_scaled_img.get(),
-                        upsample_factor=10
+                        upsample_factor=20  # Increased precision
                     )
                     
                     if scale != 1.0:
@@ -198,27 +220,46 @@ class FocusStacker:
                 weight = 1.0 / (2 ** i)  # Higher weight for finer details
                 high_freq += weight * cp.abs(residual)
             
-            # Multi-scale edge detection
+            # Enhanced multi-scale edge detection optimized for photogrammetry
             edges = cp.zeros_like(gpu_scaled)
-            for sigma in [0.5, 1.0, 2.0]:
-                blurred = cp.asarray(cv2.GaussianBlur(cp.asnumpy(gpu_scaled), (0,0), sigma))
+            # Use finer sigmas for better detail preservation
+            for sigma in [0.5, 0.75, 1.0]:
+                # Apply Gaussian blur directly on GPU with proper padding
+                blurred = gpu_scaled.copy()
+                padded = cp.pad(blurred, ((1,1), (1,1)), mode='reflect')
+                for _ in range(3):  # Approximate Gaussian with multiple box blurs
+                    blurred = (padded[:-2, 1:-1] + padded[1:-1, 1:-1] + padded[2:, 1:-1] +
+                             padded[1:-1, :-2] + padded[1:-1, 2:]) / 5.0
+                    # Re-pad for next iteration
+                    padded = cp.pad(blurred, ((1,1), (1,1)), mode='reflect')
+                    
+                # Compute edge response using FFT
                 edge = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
                     cp.fft.fft2(blurred) * cp.fft.fft2(laplace_kernel, s=blurred.shape)
                 ))))
-                edges += edge / sigma  # Weight by scale
+                
+                # Weight smaller scales more heavily for fine detail preservation
+                weight = 1.0 / (sigma * sigma)  # Quadratic weighting
+                edges += edge * weight
             
-            # Local contrast enhancement
+            # Enhanced local contrast analysis optimized for photogrammetry
             local_std = cp.zeros_like(gpu_scaled)
-            window_size = 5
-            pad_size = window_size // 2
-            padded = cp.pad(gpu_scaled, pad_size, mode='reflect')
+            window_sizes = [3, 5, 7]  # Multiple window sizes for multi-scale analysis
+            weights = [0.5, 0.3, 0.2]  # Higher weight for smaller windows (finer details)
             
-            for i in range(window_size):
-                for j in range(window_size):
-                    window = padded[i:i+gpu_scaled.shape[0], j:j+gpu_scaled.shape[1]]
-                    local_std += (window - gpu_scaled) ** 2
-                    
-            local_std = cp.sqrt(local_std / (window_size * window_size))
+            for size, weight in zip(window_sizes, weights):
+                pad_size = size // 2
+                padded = cp.pad(gpu_scaled, pad_size, mode='reflect')
+                
+                # Compute local statistics using sliding window
+                local_var = cp.zeros_like(gpu_scaled)
+                for i in range(size):
+                    for j in range(size):
+                        window = padded[i:i+gpu_scaled.shape[0], j:j+gpu_scaled.shape[1]]
+                        diff = window - gpu_scaled
+                        local_var += diff * diff
+                
+                local_std += cp.sqrt(local_var / (size * size)) * weight
             
             # Combine all focus measures with emphasis on high frequencies
             focus_map = high_freq * edges * cp.sqrt(local_std)
@@ -228,46 +269,121 @@ class FocusStacker:
                 
             focus_maps.append(focus_map)
             
-        # Weight maps by scale importance (emphasize finer details)
-        weights = [0.4, 0.3, 0.2, 0.1]  # Higher weight for finer scales
+        # Weight maps by scale importance with stronger emphasis on finest details
+        weights = [0.5, 0.3, 0.15, 0.05]  # Increased weight for finest scale
         final_focus = cp.zeros_like(focus_maps[0])
-        for fm, w in zip(focus_maps, weights):
-            final_focus += fm * w
+        
+        # Enhanced multi-scale combination
+        for i, (fm, w) in enumerate(zip(focus_maps, weights)):
+            # Apply non-linear enhancement to each scale
+            enhanced = cp.power(fm, 0.8)  # Less aggressive power for better detail preservation
+            # Apply local contrast enhancement
+            local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(enhanced), (0,0), 1.0))
+            local_detail = enhanced - local_mean
+            enhanced = enhanced + local_detail * 0.5  # Boost local contrast
+            final_focus += enhanced * w
             
-        # Aggressive contrast enhancement for photogrammetry
+        # Multi-scale contrast enhancement optimized for photogrammetry
         focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
-        focus_map = cp.power(focus_map, 0.5)  # More aggressive contrast enhancement
+        # Apply gentler contrast enhancement to preserve more gradients
+        focus_map = cp.power(focus_map, 0.7)  # Less aggressive power for better detail preservation
         
         return cp.asnumpy(focus_map).astype(np.float32)
 
     def _blend_images(self, aligned_images, focus_maps):
-        gpu_aligned = cp.array([cp.asarray(img) for img in aligned_images])
-        gpu_focus = cp.array([cp.asarray(fm) for fm in focus_maps])
+        # Process at configured scale
+        gpu_aligned = []
+        gpu_focus = []
         
-        # Edge-aware smoothing of focus maps
-        sigma = 0.5
-        for i in range(len(focus_maps)):
-            gpu_focus[i] = cp.asarray(gaussian(cp.asnumpy(gpu_focus[i]), sigma=sigma))
+        for img, fm in zip(aligned_images, focus_maps):
+            if self.scale_factor > 1:
+                # Upscale image with optimized parameters
+                h, w = img.shape[:2]
+                new_h, new_w = h * self.scale_factor, w * self.scale_factor
+                
+                # Use Lanczos4 for RGB image
+                img_up = cv2.resize(img, (new_w, new_h), 
+                                  interpolation=cv2.INTER_LANCZOS4)
+                
+                # Use linear interpolation for focus maps (smoother transitions)
+                fm_up = cv2.resize(fm, (new_w, new_h), 
+                                 interpolation=cv2.INTER_LINEAR)
+            else:
+                img_up = img
+                fm_up = fm
+            
+            # Ensure proper shape for focus maps
+            if len(fm_up.shape) == 2:
+                fm_up = fm_up.reshape(fm_up.shape[0], fm_up.shape[1], 1)
+                
+            gpu_aligned.append(cp.asarray(img_up))
+            gpu_focus.append(cp.asarray(fm_up))
+            
+        gpu_aligned = cp.array(gpu_aligned)
+        gpu_focus = cp.array(gpu_focus)  # Shape will be (N, H, W, 1)
+        
+        # Create feathered blending masks with larger overlap
+        overlap_size = 100  # increased overlap for smoother transitions
+        for i in range(len(gpu_focus)):
+            # Gaussian blur the focus map edges (handle channel dimension)
+            fm = gpu_focus[i]
+            if len(fm.shape) > 2:
+                fm_2d = fm[..., 0]  # Take first channel
+                fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm_2d), 
+                                                     (overlap_size*2+1, overlap_size*2+1), 
+                                                     overlap_size/3))
+                # Create smoother transition at boundaries with lower threshold
+                boundary = cp.abs(fm_2d - fm_blur) > 0.05
+                fm_new = cp.where(boundary, fm_blur, fm_2d)
+                gpu_focus[i] = fm_new.reshape(fm_new.shape[0], fm_new.shape[1], 1)  # Restore channel
+            else:
+                fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm), 
+                                                     (overlap_size*2+1, overlap_size*2+1), 
+                                                     overlap_size/3))
+                boundary = cp.abs(fm - fm_blur) > 0.05
+                gpu_focus[i] = cp.where(boundary, fm_blur, fm)
+            
+        # Edge-aware smoothing with adaptive radius
+        sigma = 2.0  # Increased for smoother transitions
+        for i in range(len(gpu_focus)):
+            # Handle focus maps with channel dimension
+            if len(gpu_focus[i].shape) > 2:
+                smoothed = cp.asarray(gaussian(cp.asnumpy(gpu_focus[i][..., 0]), sigma=sigma))
+                gpu_focus[i] = smoothed.reshape(smoothed.shape[0], smoothed.shape[1], 1)
+            else:
+                gpu_focus[i] = cp.asarray(gaussian(cp.asnumpy(gpu_focus[i]), sigma=sigma))
         
         # Normalize focus maps individually first
         for i in range(len(focus_maps)):
             fm = gpu_focus[i]
-            fm_min = cp.min(fm)
-            fm_max = cp.max(fm)
-            if fm_max > fm_min:
-                gpu_focus[i] = (fm - fm_min) / (fm_max - fm_min)
+            if len(fm.shape) > 2:
+                fm_2d = fm[..., 0]  # Take first channel
+                fm_min = cp.min(fm_2d)
+                fm_max = cp.max(fm_2d)
+                if fm_max > fm_min:
+                    fm_norm = (fm_2d - fm_min) / (fm_max - fm_min)
+                    gpu_focus[i] = fm_norm.reshape(fm_norm.shape[0], fm_norm.shape[1], 1)
+            else:
+                fm_min = cp.min(fm)
+                fm_max = cp.max(fm)
+                if fm_max > fm_min:
+                    gpu_focus[i] = (fm - fm_min) / (fm_max - fm_min)
         
-        # Compute weights with better normalization
-        weights_sum = cp.sum(gpu_focus, axis=0, keepdims=True)
+        # Compute weights with better normalization (handle channel dimension)
+        gpu_focus_2d = cp.array([fm[..., 0] if len(fm.shape) > 2 else fm for fm in gpu_focus])
+        weights_sum = cp.sum(gpu_focus_2d, axis=0, keepdims=True)
         weights = cp.where(weights_sum > 0, 
-                         gpu_focus / (weights_sum + 1e-10),
+                         gpu_focus_2d / (weights_sum + 1e-10),
                          1.0 / len(focus_maps))
         
         # Ensure weights sum to 1 exactly
         weights_sum = cp.sum(weights, axis=0, keepdims=True)
         weights = weights / (weights_sum + 1e-10)
         
-        weights = weights[..., None]
+        # Add channel dimension for RGB blending
+        weights = weights.reshape(weights.shape[0], weights.shape[1], weights.shape[2], 1)
+        
+        # Add channel dimension for RGB blending (weights already have shape (N, H, W, 1))
         result = cp.sum(gpu_aligned * weights, axis=0)
         
         # Calculate and preserve brightness distribution
@@ -287,13 +403,15 @@ class FocusStacker:
         final_std = float(cp.std(result))
         print(f"Final stats - mean: {final_mean:.3f}, std: {final_std:.3f}")
         
-        # Compute focus-aware sharpening mask with proper shape
+        # Compute focus-aware sharpening mask
         focus_mask = cp.zeros_like(result[...,0])  # Single channel
         for fm in gpu_focus:
-            focus_mask += (1.0 - fm)  # Higher values for out-of-focus regions
+            # Ensure focus map is 2D
+            if len(fm.shape) > 2:
+                fm = fm[..., 0]  # Take first channel if multi-dimensional
+            focus_mask += (1.0 - fm)
         focus_mask /= len(gpu_focus)
         focus_mask = cp.clip(focus_mask, 0.3, 1.0)  # Ensure minimum sharpening
-        focus_mask = focus_mask[..., None]  # Add channel dimension
         
         # Multi-scale adaptive sharpening
         result_sharp = cp.zeros_like(result)
@@ -316,7 +434,7 @@ class FocusStacker:
                 if i > 0:
                     detail = cp.asarray(cv2.resize(cp.asnumpy(detail), (result.shape[1], result.shape[0])))
                 enhancement = detail * (0.6 * (i + 1))  # Increased enhancement strength
-                enhanced += enhancement * focus_mask[...,0]  # Use single channel for enhancement
+                enhanced += enhancement * focus_mask  # Focus mask is already 2D
             
             result_sharp[...,c] = enhanced
         
@@ -327,34 +445,132 @@ class FocusStacker:
             sharp = cp.real(cp.fft.ifft2(
                 cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(sharp_kernel, s=result_sharp[...,c].shape)
             ))
-            # Apply stronger sharpening with high-frequency boost
-            sharp_strength = 0.7 * focus_mask[...,0]  # Increased sharpening strength
+            # Multi-pass sharpening with increasing strength in out-of-focus areas
+            sharp_strength = cp.clip(focus_mask * 1.2, 0.7, 0.95)  # Increased base strength
             
-            # Additional high-frequency enhancement
-            high_freq = cp.real(cp.fft.ifft2(
+            # First high-frequency enhancement pass
+            high_freq1 = cp.real(cp.fft.ifft2(
                 cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(highfreq_kernel, s=result_sharp[...,c].shape)
             ))
-            high_freq_strength = 0.3 * focus_mask[...,0]  # High-frequency boost in out-of-focus areas
-            result_sharp2[...,c] = result_sharp[...,c] + sharp * sharp_strength + high_freq * high_freq_strength
+            
+            # Multi-kernel enhancement for maximum detail preservation
+            edge_enhanced = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(edge_kernel, s=result_sharp[...,c].shape)
+            ))
+            
+            # Stronger high-frequency enhancement
+            high_freq2 = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(highfreq_kernel, s=result_sharp[...,c].shape)
+            ))
+            
+            # Deconvolution for detail recovery
+            psf = cp.array([[0.05, 0.1, 0.05],
+                          [0.1, 0.4, 0.1],
+                          [0.05, 0.1, 0.05]], dtype=cp.float32)
+            deconv = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result_sharp[...,c]) / (cp.fft.fft2(psf, s=result_sharp[...,c].shape) + 1e-4)
+            ))
+            
+            # Combine all enhancements with maximum detail preservation
+            high_freq_strength = cp.clip(focus_mask * 1.1, 0.6, 0.9)  # More aggressive strength
+            edge_strength = cp.clip(focus_mask * 0.9, 0.5, 0.8)  # Stronger edge enhancement
+            deconv_strength = cp.clip(focus_mask * 0.6, 0.3, 0.7)  # More aggressive deconvolution
+            
+            result_sharp2[...,c] = (result_sharp[...,c] + 
+                                  sharp * sharp_strength +
+                                  high_freq1 * high_freq_strength +
+                                  high_freq2 * (high_freq_strength * 0.7) +  # Increased contribution
+                                  edge_enhanced * edge_strength +  # Add edge enhancement
+                                  deconv * deconv_strength)
         
-        # Final blend with focus-aware weighting (expand alpha to match channels)
-        alpha = cp.clip(0.8 * focus_mask, 0.4, 0.9)  # Increased blend strength for sharper result
-        result = (1 - alpha) * result + alpha * result_sharp2
+        # Multi-scale feathered blending
+        def create_feather_weights(size):
+            y, x = cp.ogrid[:size[0], :size[1]]
+            weights = cp.minimum(x, size[1]-x) * cp.minimum(y, size[0]-y)
+            return weights / weights.max()
+
+        # Create feather weights for smooth transitions
+        feather = create_feather_weights(result.shape[:2])
+        feather = feather.reshape(feather.shape[0], feather.shape[1])  # Ensure 2D shape
+        
+        # Apply feathered blending across scales
+        levels = 4  # Additional pyramid level for finer detail control
+        pyramid_result = []
+        pyramid_sharp = []
+        
+        # Build Laplacian pyramids
+        current_result = result
+        current_sharp = result_sharp2
+        
+        for _ in range(levels):
+            # Gaussian blur
+            blurred_result = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current_result), (5,5), 0))
+            blurred_sharp = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current_sharp), (5,5), 0))
+            
+            # Compute and store residual
+            pyramid_result.append(current_result - blurred_result)
+            pyramid_sharp.append(current_sharp - blurred_sharp)
+            
+            # Downsample for next level
+            current_result = cp.asarray(cv2.resize(cp.asnumpy(blurred_result), 
+                                                 (blurred_result.shape[1]//2, blurred_result.shape[0]//2)))
+            current_sharp = cp.asarray(cv2.resize(cp.asnumpy(blurred_sharp), 
+                                                (blurred_sharp.shape[1]//2, blurred_sharp.shape[0]//2)))
+        
+        # Add base levels
+        pyramid_result.append(current_result)
+        pyramid_sharp.append(current_sharp)
+        
+        # Blend pyramids with feathering
+        blended_pyramid = []
+        for i, (pr, ps) in enumerate(zip(pyramid_result, pyramid_sharp)):
+            # Resize feather weights if needed
+            if pr.shape[:2] != feather.shape:
+                level_feather = cp.asarray(cv2.resize(cp.asnumpy(feather), (pr.shape[1], pr.shape[0])))
+            else:
+                level_feather = feather
+                
+            # Adaptive blending based on detail level
+            weight = level_feather * (1.0 - 0.1 * i)  # Reduce feathering influence at finer levels
+            weight = weight.reshape(weight.shape[0], weight.shape[1], 1)  # Add channel dim properly
+            blend = pr * (1 - weight) + ps * weight
+            blended_pyramid.append(blend)
+            
+        # Reconstruct image from pyramid
+        result = blended_pyramid[-1]
+        for level in reversed(blended_pyramid[:-1]):
+            result = cp.asarray(cv2.resize(cp.asnumpy(result), (level.shape[1], level.shape[0])))
+            result += level
+            
+        # Final adaptive blend with stronger emphasis on enhanced details
+        blend_mask = cp.clip(0.95 * focus_mask.reshape(focus_mask.shape[0], focus_mask.shape[1]) * feather, 0.7, 0.98)  # More aggressive blend
+        blend_mask = blend_mask.reshape(blend_mask.shape[0], blend_mask.shape[1], 1)  # Add channel dim properly
+        result = (1 - blend_mask) * result + blend_mask * result_sharp2
+        
+        # Downscale if we processed at higher resolution
+        if self.scale_factor > 1:
+            h, w = aligned_images[0].shape[:2]
+            result_np = cp.asnumpy(result)
+            
+            # Use Lanczos4 for downscaling to preserve sharpness
+            result_np = cv2.resize(result_np, (w, h), 
+                                 interpolation=cv2.INTER_LANCZOS4)
+        else:
+            result_np = cp.asnumpy(result)
         
         # Re-normalize to input brightness distribution
-        result_mean = float(cp.mean(result))
-        result_std = float(cp.std(result))
-        result = (result - result_mean) * (input_std / result_std) + input_mean
+        result_mean = float(np.mean(result_np))
+        result_std = float(np.std(result_np))
+        result_np = (result_np - result_mean) * (input_std / result_std) + input_mean
         
         # Clip while preserving relative brightness
-        result_np = cp.asnumpy(result)
         result_np = np.clip(result_np, 0, 1)
         
         # Final brightness check
         final_mean = float(np.mean(result_np))
         print(f"Final output mean: {final_mean:.3f}")
         
-        return np.clip(result_np, 0, 1)
+        return result_np
 
     def split_into_stacks(self, image_paths, stack_size):
         import re

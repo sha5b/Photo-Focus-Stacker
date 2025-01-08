@@ -58,13 +58,15 @@ class MainWindow(QMainWindow):
         self.image_paths = []
         
         # Default stacking parameters optimized for photogrammetry
-        self.radius = 2    # Minimum radius for maximum micro-detail preservation
-        self.smoothing = 1 # Minimal smoothing for sharpest possible output
+        self.radius = 2      # Minimum radius for maximum micro-detail preservation
+        self.smoothing = 1   # Minimal smoothing for sharpest possible output
+        self.scale = 2       # Default 2x upscaling for processing
         
         # Create stacker with default parameters
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing
+            smoothing=self.smoothing,
+            scale_factor=self.scale
         )
         
         self.init_ui()
@@ -95,6 +97,19 @@ class MainWindow(QMainWindow):
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
         
+        # Scale control
+        scale_label = QLabel('Processing Scale:')
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(['1x', '2x', '3x', '4x'])
+        self.scale_combo.setCurrentText(f"{self.scale}x")
+        self.scale_combo.currentTextChanged.connect(self.update_stacker)
+        scale_desc = QLabel("Higher values may improve detail but increase processing time. 2x recommended.")
+        scale_desc.setWordWrap(True)
+        
+        params_layout.addWidget(scale_label, 0, 0)
+        params_layout.addWidget(self.scale_combo, 0, 1)
+        params_layout.addWidget(scale_desc, 1, 0, 1, 2)
+        
         # Radius control
         radius_label = QLabel('Radius:')
         self.radius_combo = QComboBox()
@@ -113,13 +128,28 @@ class MainWindow(QMainWindow):
         smoothing_desc = QLabel("Keep at 1 for photogrammetry to preserve maximum detail, increase only if artifacts appear")
         smoothing_desc.setWordWrap(True)
         
-        # Add parameter controls to grid
-        params_layout.addWidget(radius_label, 0, 0)
-        params_layout.addWidget(self.radius_combo, 0, 1)
-        params_layout.addWidget(radius_desc, 1, 0, 1, 2)
-        params_layout.addWidget(smoothing_label, 2, 0)
-        params_layout.addWidget(self.smoothing_combo, 2, 1)
-        params_layout.addWidget(smoothing_desc, 3, 0, 1, 2)
+        # Add parameter controls to grid in correct order
+        row = 0
+        
+        # Scale control (first)
+        params_layout.addWidget(scale_label, row, 0)
+        params_layout.addWidget(self.scale_combo, row, 1)
+        row += 1
+        params_layout.addWidget(scale_desc, row, 0, 1, 2)
+        row += 1
+        
+        # Radius control (second)
+        params_layout.addWidget(radius_label, row, 0)
+        params_layout.addWidget(self.radius_combo, row, 1)
+        row += 1
+        params_layout.addWidget(radius_desc, row, 0, 1, 2)
+        row += 1
+        
+        # Smoothing control (third)
+        params_layout.addWidget(smoothing_label, row, 0)
+        params_layout.addWidget(self.smoothing_combo, row, 1)
+        row += 1
+        params_layout.addWidget(smoothing_desc, row, 0, 1, 2)
         
         params_group.setLayout(params_layout)
         
@@ -165,9 +195,11 @@ class MainWindow(QMainWindow):
         self.radius = int(self.radius_combo.currentText())
         self.smoothing = int(self.smoothing_combo.currentText())
         
+        self.scale = int(self.scale_combo.currentText().replace('x', ''))
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing
+            smoothing=self.smoothing,
+            scale_factor=self.scale
         )
 
     def detect_stack_size(self, image_paths):
