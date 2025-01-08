@@ -57,9 +57,9 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.image_paths = []
         
-        # Default stacking parameters optimized for detail preservation
-        self.radius = 3    # Small radius for maximum detail detection
-        self.smoothing = 1 # Minimal smoothing to preserve edges
+        # Default stacking parameters optimized for photogrammetry
+        self.radius = 2    # Minimum radius for maximum micro-detail preservation
+        self.smoothing = 1 # Minimal smoothing for sharpest possible output
         
         # Create stacker with default parameters
         self.stacker = FocusStacker(
@@ -101,7 +101,7 @@ class MainWindow(QMainWindow):
         self.radius_combo.addItems([str(i) for i in range(1, 21)])
         self.radius_combo.setCurrentText(str(self.radius))
         self.radius_combo.currentTextChanged.connect(self.update_stacker)
-        radius_desc = QLabel("Lower values (2-3) maximize micro-detail sharpness, higher values (4+) for smoother transitions")
+        radius_desc = QLabel("Use 2 for maximum sharpness in photogrammetry, 3+ only if noise becomes problematic")
         radius_desc.setWordWrap(True)
         
         # Smoothing control
@@ -110,7 +110,7 @@ class MainWindow(QMainWindow):
         self.smoothing_combo.addItems([str(i) for i in range(1, 11)])
         self.smoothing_combo.setCurrentText(str(self.smoothing))
         self.smoothing_combo.currentTextChanged.connect(self.update_stacker)
-        smoothing_desc = QLabel("Lower values (1-2) preserve micro-contrast, higher values (3+) smooth transitions")
+        smoothing_desc = QLabel("Keep at 1 for photogrammetry to preserve maximum detail, increase only if artifacts appear")
         smoothing_desc.setWordWrap(True)
         
         # Add parameter controls to grid

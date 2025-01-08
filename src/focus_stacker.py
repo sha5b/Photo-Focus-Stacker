@@ -18,10 +18,15 @@ laplace_kernel = cp.array([[0, 1, 0],
                           [1, -4, 1],
                           [0, 1, 0]], dtype=cp.float32)
 
-# Milder sharpening kernel to avoid darkening
-sharp_kernel = cp.array([[-0.5,-0.5,-0.5],
-                        [-0.5, 5,-0.5],
-                        [-0.5,-0.5,-0.5]], dtype=cp.float32)
+# Aggressive sharpening kernel optimized for photogrammetry
+sharp_kernel = cp.array([[-1,-1,-1],
+                        [-1, 9,-1],
+                        [-1,-1,-1]], dtype=cp.float32)
+
+# High-frequency enhancement kernel
+highfreq_kernel = cp.array([[-1,-1,-1],
+                          [-1, 8,-1],
+                          [-1,-1,-1]], dtype=cp.float32)
 
 class FocusStacker:
     def __init__(self, radius=8, smoothing=4):
@@ -158,47 +163,60 @@ class FocusStacker:
         else:
             img = (img * 255).astype(np.uint8)
             
-        # Multi-scale focus detection
+        # Convert to GPU array
         gpu_img = cp.asarray(img.astype(np.float32))
         
-        # Compute focus at multiple scales
-        scales = [1.0, 0.5]
+        # Multi-scale wavelet decomposition for focus detection
+        levels = 4
         focus_maps = []
         
-        for scale in scales:
-            if scale != 1.0:
-                scaled_img = cv2.resize(img, None, fx=scale, fy=scale)
-                gpu_scaled = cp.asarray(scaled_img.astype(np.float32))
+        for scale in range(levels):
+            # Apply wavelet decomposition
+            if scale > 0:
+                gpu_scaled = cp.asarray(cv2.resize(cp.asnumpy(gpu_img), None, fx=1.0/(2**scale), fy=1.0/(2**scale)))
             else:
                 gpu_scaled = gpu_img
+                
+            # High-frequency components extraction
+            high_freq = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
+                cp.fft.fft2(gpu_scaled) * cp.fft.fft2(highfreq_kernel, s=gpu_scaled.shape)
+            ))))
             
-            # Edge detection using Laplacian
-            laplacian = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
+            # Edge detection with enhanced sensitivity
+            edges = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
                 cp.fft.fft2(gpu_scaled) * cp.fft.fft2(laplace_kernel, s=gpu_scaled.shape)
             ))))
             
-            # Local contrast using gradient magnitude
-            dx = cp.gradient(gpu_scaled, axis=1)
-            dy = cp.gradient(gpu_scaled, axis=0)
-            gradient_mag = cp.sqrt(dx**2 + dy**2)
+            # Local contrast enhancement
+            local_std = cp.zeros_like(gpu_scaled)
+            window_size = 5
+            pad_size = window_size // 2
+            padded = cp.pad(gpu_scaled, pad_size, mode='reflect')
             
-            # Combine edge and contrast information
-            focus_map = laplacian * cp.sqrt(gradient_mag)
+            for i in range(window_size):
+                for j in range(window_size):
+                    window = padded[i:i+gpu_scaled.shape[0], j:j+gpu_scaled.shape[1]]
+                    local_std += (window - gpu_scaled) ** 2
+                    
+            local_std = cp.sqrt(local_std / (window_size * window_size))
             
-            if scale != 1.0:
-                focus_map = cp.asarray(cv2.resize(
-                    cp.asnumpy(focus_map), 
-                    (img.shape[1], img.shape[0])
-                ))
+            # Combine all focus measures with emphasis on high frequencies
+            focus_map = high_freq * edges * cp.sqrt(local_std)
             
+            if scale > 0:
+                focus_map = cp.asarray(cv2.resize(cp.asnumpy(focus_map), (img.shape[1], img.shape[0])))
+                
             focus_maps.append(focus_map)
-        
-        # Combine multi-scale focus maps
-        final_focus = cp.maximum(focus_maps[0], focus_maps[1])
-        
-        # Normalize with contrast-aware enhancement
+            
+        # Weight maps by scale importance (emphasize finer details)
+        weights = [0.4, 0.3, 0.2, 0.1]  # Higher weight for finer scales
+        final_focus = cp.zeros_like(focus_maps[0])
+        for fm, w in zip(focus_maps, weights):
+            final_focus += fm * w
+            
+        # Aggressive contrast enhancement for photogrammetry
         focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
-        focus_map = cp.power(focus_map, 0.75)  # Moderate contrast enhancement
+        focus_map = cp.power(focus_map, 0.5)  # More aggressive contrast enhancement
         
         return cp.asnumpy(focus_map).astype(np.float32)
 
@@ -232,36 +250,57 @@ class FocusStacker:
         weights = weights[..., None]
         result = cp.sum(gpu_aligned * weights, axis=0)
         
-        # Calculate and preserve average brightness
-        input_brightness = float(cp.mean(gpu_aligned))
-        result_brightness = float(cp.mean(result))
-        print(f"Input brightness: {input_brightness:.3f}")
-        print(f"Initial result brightness: {result_brightness:.3f}")
+        # Calculate and preserve brightness distribution
+        input_mean = float(cp.mean(gpu_aligned))
+        input_std = float(cp.std(gpu_aligned))
+        result_mean = float(cp.mean(result))
+        result_std = float(cp.std(result))
         
-        if result_brightness > 0:
-            scale_factor = input_brightness / result_brightness
-            result = result * scale_factor
-            print(f"Applied brightness scale factor: {scale_factor:.3f}")
-            print(f"Final result brightness: {float(cp.mean(result)):.3f}")
+        print(f"Input stats - mean: {input_mean:.3f}, std: {input_std:.3f}")
+        print(f"Result stats - mean: {result_mean:.3f}, std: {result_std:.3f}")
         
-        # Apply milder sharpening
+        # Normalize result to match input distribution
+        result = (result - result_mean) * (input_std / result_std) + input_mean
+        
+        # Verify final stats
+        final_mean = float(cp.mean(result))
+        final_std = float(cp.std(result))
+        print(f"Final stats - mean: {final_mean:.3f}, std: {final_std:.3f}")
+        
+        # Enhanced sharpening with brightness preservation
         result_sharp = cp.zeros_like(result)
+        
+        # First pass: High-frequency enhancement with reduced strength
         for c in range(3):
-            result_sharp[...,c] = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result[...,c]) * cp.fft.fft2(sharp_kernel, s=result[...,c].shape)
+            high_freq = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result[...,c]) * cp.fft.fft2(highfreq_kernel, s=result[...,c].shape)
             ))
-        
-        # Blend sharpened result with brightness preservation
-        alpha = 0.2  # Reduced sharpening strength
-        result = (1 - alpha) * result + alpha * result_sharp
-        
-        # Ensure we maintain original brightness range
-        result_np = cp.asnumpy(result)
+            result_sharp[...,c] = result[...,c] + 0.2 * high_freq
+            
+        # Second pass: Controlled sharpening
+        result_sharp2 = cp.zeros_like(result)
         for c in range(3):
-            min_val = result_np[..., c].min()
-            max_val = result_np[..., c].max()
-            if max_val > min_val:
-                result_np[..., c] = (result_np[..., c] - min_val) / (max_val - min_val)
+            sharp = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(sharp_kernel, s=result_sharp[...,c].shape)
+            ))
+            result_sharp2[...,c] = result_sharp[...,c] + 0.3 * sharp
+            
+        # Final blend with reduced strength to preserve brightness
+        alpha = 0.4  # Reduced sharpening strength
+        result = (1 - alpha) * result + alpha * result_sharp2
+        
+        # Re-normalize to input brightness distribution
+        result_mean = float(cp.mean(result))
+        result_std = float(cp.std(result))
+        result = (result - result_mean) * (input_std / result_std) + input_mean
+        
+        # Clip while preserving relative brightness
+        result_np = cp.asnumpy(result)
+        result_np = np.clip(result_np, 0, 1)
+        
+        # Final brightness check
+        final_mean = float(np.mean(result_np))
+        print(f"Final output mean: {final_mean:.3f}")
         
         return np.clip(result_np, 0, 1)
 
