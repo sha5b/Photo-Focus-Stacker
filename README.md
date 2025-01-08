@@ -1,8 +1,47 @@
 # Focus Stacking for Microscopy and Macro Photography
 
+This focus stacking tool was developed specifically for the [OpenScan](https://openscan.eu) community to enable high-quality focus stacking for photogrammetry and 3D scanning applications. OpenScan is an open-source 3D scanner project that makes professional 3D scanning accessible to everyone.
+
+## Quick Start Guide
+
+### Using the GUI
+
+1. Launch the application:
+```bash
+python src/main.py
+```
+
+2. Using the tool:
+   - Click "Select Images" to choose your focus stack images
+   - Images should be taken at different focus distances of the same subject
+   - Name your images with sequential numbers (e.g., scan_1.jpg, scan_2.jpg, etc.) For best results check the output filenames of your Openscanner, should be ok.
+   - All images in a stack should be taken with the same camera settings
+   - Recommended: 5-15 images per stack with small focus steps
+
+3. Processing:
+   - Select your output folder
+   - Click "Process Stack" to start focus stacking
+   - The tool will automatically align and blend your images
+   - Results will be saved in your chosen output folder
+
+### Tips for Best Results
+
+1. Image Capture:
+   - Use a stable setup (tripod or scanning rig)
+   - Keep consistent lighting
+   - Use manual focus and consistent camera settings
+   - Take more images than you think you need (small focus steps)
+   - Ensure good overlap between focus areas
+
+2. For Photogrammetry:
+   - Ensure the main subject is perfectly sharp
+   - Background blur is acceptable and normal
+   - Use enough images to capture all depth levels of your subject
+
 Advanced focus stacking implementation optimized for microscopy and macro photography, with GPU acceleration using CUDA. This tool is specifically designed for handling the unique challenges of microscopy and macro photography, including high magnification, shallow depth of field, and the need for precise alignment.
 
 Perfect for:
+- Photogrammetry and 3D scanning
 - Microscopy imaging (biological, metallurgical, etc.)
 - Macro photography (insects, minerals, small objects)
 - Product photography requiring full depth of field
@@ -57,9 +96,10 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Usage
+## Advanced Usage (Python API)
 
-Basic usage:
+For advanced users who want to integrate the focus stacking into their own scripts:
+
 ```python
 from focus_stacker import FocusStacker
 
@@ -79,25 +119,6 @@ for i, stack in enumerate(stacks):
     result = stacker.process_stack(stack)
     stacker.save_image(result, f'output_{i+1}.jpg')
 ```
-
-### Tips for Best Results
-
-1. Image Capture:
-   - Use a tripod or stable mounting
-   - Ensure consistent lighting across all images
-   - Take more images than you think you need (small focus steps)
-   - Use manual focus and consistent camera settings
-
-2. Memory Management:
-   - For large images (>30MP), start with scale_factor=1
-   - Process one stack at a time
-   - Close other GPU-intensive applications
-
-3. Troubleshooting:
-   - If alignment fails, try with more overlap between focus steps
-   - For noisy results, increase the smoothing parameter
-   - For more detail, decrease radius and increase scale_factor
-   - If you get CUDA out of memory errors, reduce scale_factor
 
 ### Options
 
@@ -120,26 +141,17 @@ stacker = FocusStacker(
 )
 ```
 
-### Automatic Stack Detection
+### Memory Management Tips
 
-The `split_into_stacks` method can automatically group images into stacks based on filename patterns:
-```python
-stacks = stacker.split_into_stacks(image_paths, stack_size=3)
-for stack in stacks:
-    result = stacker.process_stack(stack)
-    # Save each result...
-```
+1. For large images (>30MP):
+   - Start with scale_factor=1
+   - Process one stack at a time
+   - Close other GPU-intensive applications
 
-## Improvements
-
-Current areas being worked on:
-
-1. Memory optimization for processing very large images
-2. Enhanced alignment for challenging subjects
-3. Additional color space support
-4. Multi-GPU support for faster processing
-5. Batch processing interface
-6. Progress reporting and cancellation support
+2. If you get CUDA out of memory errors:
+   - Reduce scale_factor
+   - Process smaller batches
+   - Free up GPU memory from other applications
 
 ## Performance and Results
 

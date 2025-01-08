@@ -18,22 +18,27 @@ laplace_kernel = cp.array([[0, 1, 0],
                           [1, -4, 1],
                           [0, 1, 0]], dtype=cp.float32)
 
-# Ultra-sharp kernel optimized for photogrammetry micro-detail
-sharp_kernel = cp.array([[-3,-3,-3],
-                        [-3, 25,-3],
-                        [-3,-3,-3]], dtype=cp.float32)
+# Ultra-sharp kernel with extreme micro-detail preservation
+sharp_kernel = cp.array([[-4,-4,-4],
+                        [-4, 33,-4],
+                        [-4,-4,-4]], dtype=cp.float32)
 
-# Enhanced high-frequency kernel for maximum detail recovery
-highfreq_kernel = cp.array([[-3,-3,-3],
-                          [-3, 24,-3],
-                          [-3,-3,-3]], dtype=cp.float32)
+# Maximum detail recovery kernel with stronger edge emphasis
+highfreq_kernel = cp.array([[-2,-3,-2],
+                          [-3, 25,-3],
+                          [-2,-3,-2]], dtype=cp.float32)
 
-# Edge enhancement kernel with stronger center weight
-edge_kernel = cp.array([[-2,-2,-2,-2,-2],
-                       [-2, 3, 3, 3,-2],
-                       [-2, 3, 12, 3,-2],
-                       [-2, 3, 3, 3,-2],
-                       [-2,-2,-2,-2,-2]], dtype=cp.float32)
+# Enhanced edge detection with multi-directional sensitivity
+edge_kernel = cp.array([[-3,-3,-3,-3,-3],
+                       [-3, 4, 4, 4,-3],
+                       [-3, 4, 16, 4,-3],
+                       [-3, 4, 4, 4,-3],
+                       [-3,-3,-3,-3,-3]], dtype=cp.float32)
+
+# Fine detail enhancement kernel for microscopic features
+detail_kernel = cp.array([[-1,-2,-1],
+                         [-2, 13,-2],
+                         [-1,-2,-1]], dtype=cp.float32)
 
 class FocusStacker:
     def __init__(self, radius=8, smoothing=4, scale_factor=2):
@@ -220,32 +225,61 @@ class FocusStacker:
                 weight = 1.0 / (2 ** i)  # Higher weight for finer details
                 high_freq += weight * cp.abs(residual)
             
-            # Enhanced multi-scale edge detection optimized for photogrammetry
+            # Enhanced 3D-aware edge detection optimized for photogrammetry
             edges = cp.zeros_like(gpu_scaled)
-            # Use finer sigmas for better detail preservation
-            for sigma in [0.5, 0.75, 1.0]:
-                # Apply Gaussian blur directly on GPU with proper padding
-                blurred = gpu_scaled.copy()
-                padded = cp.pad(blurred, ((1,1), (1,1)), mode='reflect')
-                for _ in range(3):  # Approximate Gaussian with multiple box blurs
-                    blurred = (padded[:-2, 1:-1] + padded[1:-1, 1:-1] + padded[2:, 1:-1] +
-                             padded[1:-1, :-2] + padded[1:-1, 2:]) / 5.0
-                    # Re-pad for next iteration
-                    padded = cp.pad(blurred, ((1,1), (1,1)), mode='reflect')
-                    
-                # Compute edge response using FFT
-                edge = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
-                    cp.fft.fft2(blurred) * cp.fft.fft2(laplace_kernel, s=blurred.shape)
-                ))))
-                
-                # Weight smaller scales more heavily for fine detail preservation
-                weight = 1.0 / (sigma * sigma)  # Quadratic weighting
-                edges += edge * weight
             
-            # Enhanced local contrast analysis optimized for photogrammetry
+            # Enhanced multi-directional gradient analysis for maximum detail detection
+            gradients = []
+            angles = [0, 30, 60, 90, 120, 150]  # More angles for finer detail detection
+            
+            for angle in angles:
+                # Rotate image to analyze gradients at different angles
+                if angle > 0:
+                    rotated = cp.asarray(cv2.warpAffine(cp.asnumpy(gpu_scaled),
+                                                       cv2.getRotationMatrix2D((gpu_scaled.shape[1]/2, 
+                                                                              gpu_scaled.shape[0]/2),
+                                                                              angle, 1.0),
+                                                       gpu_scaled.shape))
+                else:
+                    rotated = gpu_scaled
+                
+                # Enhanced multi-scale gradient analysis with finer steps
+                for sigma in [0.3, 0.5, 0.7, 0.9]:  # Finer sigma steps for more precise detail detection
+                    # Enhanced gradient calculation with depth awareness
+                    dx = cp.asarray(cv2.Sobel(cp.asnumpy(rotated), cv2.CV_32F, 1, 0, ksize=3))
+                    dy = cp.asarray(cv2.Sobel(cp.asnumpy(rotated), cv2.CV_32F, 0, 1, ksize=3))
+                    
+                    # Compute gradient magnitude with depth weighting
+                    gradient = cp.sqrt(dx*dx + dy*dy)
+                    
+                    # Enhanced depth-aware smoothing with stronger edge preservation
+                    gradient = cp.asarray(cv2.bilateralFilter(cp.asnumpy(gradient), 5, 75, 75))
+                    # Additional bilateral pass for better detail preservation
+                    gradient = cp.asarray(cv2.bilateralFilter(cp.asnumpy(gradient), 3, 25, 25))
+                    
+                    # Rotate gradient back if needed
+                    if angle > 0:
+                        gradient = cp.asarray(cv2.warpAffine(cp.asnumpy(gradient),
+                                                           cv2.getRotationMatrix2D((gradient.shape[1]/2,
+                                                                                  gradient.shape[0]/2),
+                                                                                  -angle, 1.0),
+                                                           gradient.shape))
+                    
+                    # Weight by scale importance
+                    weight = 1.0 / (sigma * sigma)
+                    gradients.append(gradient * weight)
+            
+            # Combine gradients with depth continuity awareness
+            for gradient in gradients:
+                edges += gradient
+                
+            # Apply bilateral filtering to preserve depth discontinuities
+            edges = cp.asarray(cv2.bilateralFilter(cp.asnumpy(edges), 7, 100, 100))
+            
+            # Enhanced multi-scale local contrast analysis
             local_std = cp.zeros_like(gpu_scaled)
-            window_sizes = [3, 5, 7]  # Multiple window sizes for multi-scale analysis
-            weights = [0.5, 0.3, 0.2]  # Higher weight for smaller windows (finer details)
+            window_sizes = [3, 5, 7, 9, 11]  # Additional window size for finer granularity
+            weights = [0.35, 0.3, 0.2, 0.1, 0.05]  # Adjusted weights for better detail balance
             
             for size, weight in zip(window_sizes, weights):
                 pad_size = size // 2
@@ -270,24 +304,54 @@ class FocusStacker:
             
             focus_maps.append(focus_map)
             
-        # Weight maps by scale importance with stronger emphasis on finest details
-        weights = [0.5, 0.3, 0.15, 0.05]  # Increased weight for finest scale
-        final_focus = cp.zeros_like(focus_maps[0])
-        
-        # Enhanced multi-scale combination
-        for i, (fm, w) in enumerate(zip(focus_maps, weights)):
-            # Apply non-linear enhancement to each scale
-            enhanced = cp.power(fm, 0.8)  # Less aggressive power for better detail preservation
-            # Apply local contrast enhancement
-            local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(enhanced), (0,0), 1.0))
-            local_detail = enhanced - local_mean
-            enhanced = enhanced + local_detail * 0.5  # Boost local contrast
-            final_focus += enhanced * w
+            # Enhanced detail-preserving scale weighting
+            weights = [0.6, 0.25, 0.1, 0.05]  # Stronger emphasis on finest details
+            final_focus = cp.zeros_like(focus_maps[0])
             
-        # Multi-scale contrast enhancement optimized for photogrammetry
-        focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
-        # Apply gentler contrast enhancement to preserve more gradients
-        focus_map = cp.power(focus_map, 0.7)  # Less aggressive power for better detail preservation
+            # Enhanced multi-scale combination with subject-aware weighting
+            for i, (fm, w) in enumerate(zip(focus_maps, weights)):
+                # Calculate local variance to identify high-detail regions (likely the main subject)
+                local_var = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm * fm), (15, 15), 0)) - \
+                          cp.power(cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm), (15, 15), 0)), 2)
+                
+                # Create detail-aware mask
+                detail_mask = cp.clip((local_var - cp.min(local_var)) / (cp.max(local_var) - cp.min(local_var) + 1e-6), 0.3, 1.0)
+                
+                # Enhanced detail preservation with stronger local contrast
+                enhanced = cp.power(fm, 0.6 + 0.4 * detail_mask)  # More aggressive enhancement for details
+                
+                # Multi-scale local contrast enhancement
+                for radius in [1, 3, 5]:
+                    local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(enhanced), (radius*2+1, radius*2+1), radius/2))
+                    local_detail = enhanced - local_mean
+                    enhanced = enhanced + local_detail * (0.4 + 0.4 * detail_mask) * (1.0 - radius/6)
+                
+                # Edge-aware detail boost
+                edge_strength = cp.asarray(cv2.Laplacian(cp.asnumpy(enhanced), cv2.CV_32F))
+                edge_mask = cp.clip(cp.abs(edge_strength) / (cp.max(cp.abs(edge_strength)) + 1e-6), 0, 1)
+                
+                # Combine with detail-weighted contribution
+                final_focus += enhanced * w * (0.8 + 0.4 * detail_mask) * (1.0 + 0.5 * edge_mask)
+            
+            # Enhanced contrast normalization with edge preservation
+            focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
+            
+            # Multi-scale detail mask for adaptive enhancement
+            detail_masks = []
+            for radius in [15, 25, 35]:
+                mask = cp.asarray(cv2.GaussianBlur(cp.asnumpy(focus_map * focus_map), (radius, radius), radius/3))
+                mask = (mask - cp.min(mask)) / (cp.max(mask) - cp.min(mask) + 1e-6)
+                detail_masks.append(mask)
+            
+            # Combine detail masks with different weights
+            detail_mask = detail_masks[0] * 0.5 + detail_masks[1] * 0.3 + detail_masks[2] * 0.2
+            
+            # Enhanced adaptive normalization
+            focus_map = cp.power(focus_map, 0.4 + 0.4 * detail_mask)  # More aggressive enhancement
+            # Additional local contrast boost
+            local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(focus_map), (7, 7), 1.5))
+            local_detail = focus_map - local_mean
+            focus_map = focus_map + local_detail * 0.3 * (1.0 + detail_mask)
         
         return cp.asnumpy(focus_map).astype(np.float32)
 
@@ -336,21 +400,54 @@ class FocusStacker:
             # Process focus map
             gpu_fm = cp.asarray(fm_up)
             
-            # Apply feathered blending mask
-            overlap_size = 100
+            # Apply adaptive feathered blending mask with object-aware transitions
+            overlap_size = 150  # Increased for smoother transitions
             if len(gpu_fm.shape) > 2:
                 fm_2d = gpu_fm[..., 0]
             else:
                 fm_2d = gpu_fm
                 
-            fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm_2d),
-                                                 (overlap_size*2+1, overlap_size*2+1),
-                                                 overlap_size/3))
-            boundary = cp.abs(fm_2d - fm_blur) > 0.05
-            fm_new = cp.where(boundary, fm_blur, fm_2d)
+            # Enhanced depth-aware blending with object boundary preservation
+            fm_new = cp.zeros_like(fm_2d)
             
-            # Edge-aware smoothing
-            smoothed = cp.asarray(gaussian(cp.asnumpy(fm_new), sigma=2.0))
+            # Multi-scale analysis for depth and boundary detection
+            scales = [200, 150, 100, 50]  # Extended scale range for better depth perception
+            weights = [0.35, 0.3, 0.2, 0.15]  # Adjusted weights for smoother transitions
+            
+            # Calculate depth gradient for boundary detection
+            dx = cp.asarray(cv2.Sobel(cp.asnumpy(fm_2d), cv2.CV_32F, 1, 0, ksize=3))
+            dy = cp.asarray(cv2.Sobel(cp.asnumpy(fm_2d), cv2.CV_32F, 0, 1, ksize=3))
+            depth_gradient = cp.sqrt(dx*dx + dy*dy)
+            
+            # Create depth-aware mask
+            depth_mask = cp.asarray(cv2.bilateralFilter(cp.asnumpy(depth_gradient), 9, 75, 75))
+            depth_mask = (depth_mask - cp.min(depth_mask)) / (cp.max(depth_mask) - cp.min(depth_mask) + 1e-6)
+            
+            for scale, weight in zip(scales, weights):
+                # Multi-scale Gaussian analysis
+                fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm_2d),
+                                                     (scale*2+1, scale*2+1),
+                                                     scale/3))
+                
+                # Enhanced edge detection with depth awareness
+                edge_strength = cp.abs(fm_2d - fm_blur)
+                edge_strength = edge_strength * (1.0 + depth_mask)  # Boost edges in depth transition areas
+                
+                # Adaptive threshold based on local statistics with depth consideration
+                local_std = cp.asarray(cv2.GaussianBlur(cp.asnumpy(edge_strength * edge_strength),
+                                                       (25, 25), 0))
+                threshold = cp.mean(edge_strength) + cp.std(edge_strength) * (2.0 + depth_mask)
+                
+                # Combine with depth-aware weighting
+                blend_weight = weight * (1.0 + 0.5 * depth_mask)  # Increase weight in depth transition areas
+                fm_new += cp.where(edge_strength > threshold,
+                                 fm_blur * blend_weight,
+                                 fm_2d * blend_weight)
+            
+            # Enhanced depth-aware smoothing with stronger edge preservation
+            smoothed = cp.asarray(cv2.bilateralFilter(cp.asnumpy(fm_new), 11, 100, 100))
+            # Additional bilateral filter pass for smoother transitions while preserving depth edges
+            smoothed = cp.asarray(cv2.bilateralFilter(cp.asnumpy(smoothed), 7, 50, 50))
             
             # Normalize focus map
             fm_min = cp.min(smoothed)
@@ -381,15 +478,30 @@ class FocusStacker:
         input_std = float(cp.std(ref_img))
         max_ref = float(cp.max(ref_img))
         
-        # Normalize result while preserving original characteristics
-        result_mean = float(cp.mean(result))
-        result_std = float(cp.std(result))
-        # Use a stronger blend factor to stay closer to original brightness
-        blend_factor = 0.95  # 95% of original brightness, 5% normalized
-        # Apply gentler normalization
-        normalized = ((result - result_mean) * (input_std / (result_std + 1e-6)) + input_mean)
-        result = result * blend_factor + normalized * (1 - blend_factor)
-        # Additional brightness correction to prevent overshooting
+        # Simpler dynamic range preservation that maintains original brightness
+        # Calculate reference statistics
+        ref_min = float(cp.min(ref_img))
+        ref_max = float(cp.max(ref_img))
+        ref_range = ref_max - ref_min
+        
+        # Normalize result to match reference range
+        result_min = float(cp.min(result))
+        result_max = float(cp.max(result))
+        result = (result - result_min) * (ref_range / (result_max - result_min + 1e-6)) + ref_min
+        
+        # Apply gentle contrast enhancement
+        for c in range(3):
+            # Calculate channel-specific reference stats
+            channel_min = float(cp.min(ref_img[...,c]))
+            channel_max = float(cp.max(ref_img[...,c]))
+            channel_mean = float(cp.mean(ref_img[...,c]))
+            
+            # Preserve original range while gently enhancing contrast
+            result[...,c] = cp.clip(result[...,c], channel_min, channel_max)
+            # Adjust contrast while maintaining mean
+            result[...,c] = (result[...,c] - channel_mean) * 1.1 + channel_mean
+            
+        # Final range adjustment
         result = cp.clip(result, 0.0, max_ref)
         
         # Clean up reference image
@@ -432,9 +544,32 @@ class FocusStacker:
                 cp.fft.fft2(result[...,c]) * cp.fft.fft2(highfreq_kernel, s=result[...,c].shape)
             ))
             
-            # Combine enhancements
-            sharp_strength = cp.clip(focus_mask * 1.2, 0.7, 0.95)
-            sharp_result[...,c] = result[...,c] + sharp * sharp_strength + high_freq * 0.3
+            # Enhanced multi-scale sharpening with extreme detail preservation
+            # Calculate local variance with finer sensitivity
+            local_var = cp.asarray(cv2.GaussianBlur(cp.asnumpy(result[...,c] * result[...,c]), (11, 11), 0)) - \
+                       cp.power(cp.asarray(cv2.GaussianBlur(cp.asnumpy(result[...,c]), (11, 11), 0)), 2)
+            
+            # Enhanced detail mask with stronger edge detection
+            detail_mask = cp.clip((local_var - cp.min(local_var)) / (cp.max(local_var) - cp.min(local_var) + 1e-6), 0.4, 1.0)
+            
+            # Fine detail enhancement
+            fine_detail = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result[...,c]) * cp.fft.fft2(detail_kernel, s=result[...,c].shape)
+            ))
+            
+            # Adaptive multi-scale sharpening
+            sharp_strength = cp.clip(focus_mask * (1.4 + 0.4 * detail_mask), 0.8, 0.99)
+            
+            # Gentler detail enhancement that preserves original brightness
+            # Calculate local contrast for adaptive sharpening
+            local_contrast = cp.asarray(cv2.Laplacian(cp.asnumpy(result[...,c]), cv2.CV_32F))
+            contrast_mask = cp.clip(cp.abs(local_contrast) / (cp.max(cp.abs(local_contrast)) + 1e-6), 0.2, 0.6)
+            
+            # Combine enhancements with reduced strength
+            sharp_result[...,c] = result[...,c] + \
+                                 sharp * sharp_strength * 0.5 * contrast_mask + \
+                                 high_freq * 0.2 * contrast_mask + \
+                                 fine_detail * 0.1 * contrast_mask  # Minimal enhancement to preserve brightness
             
             # Clear intermediate results
             del sharp, high_freq
