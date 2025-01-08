@@ -16,12 +16,15 @@ class FocusStacker:
     @brief Implements focus stacking algorithm to combine multiple images
     """
     
-    def __init__(self, radius=8, smoothing=4, enhance_sharpness=True):
+    def __init__(self, radius=8, smoothing=4, enhance_sharpness=True, sharpening_params=None):
         """
         Initialize focus stacker with parameters
         @param radius Size of area around each pixel for focus detection (1-20)
         @param smoothing Amount of smoothing for transitions (1-10)
         @param enhance_sharpness Whether to enhance sharpness in poorly focused regions
+        @param sharpening_params Dictionary containing sharpening parameters:
+            - snr_values: List of 3 SNR values for multi-scale deconvolution
+            - focus_threshold: Threshold for determining regions to enhance
         """
         if not 1 <= radius <= 20:
             raise ValueError("Radius must be between 1 and 20")
@@ -32,6 +35,15 @@ class FocusStacker:
         self.radius = radius  # Used for focus measure window and guided filter
         self.smoothing = smoothing  # Used for guided filter epsilon
         self.enhance_sharpness = enhance_sharpness
+        
+        # Set default sharpening parameters if none provided
+        if sharpening_params is None:
+            self.sharpening_params = {
+                'snr_values': [100, 80, 60],  # More conservative values
+                'focus_threshold': 0.3  # More selective enhancement
+            }
+        else:
+            self.sharpening_params = sharpening_params
         
         # Derived parameters
         self.window_size = 2 * radius + 1  # Window size for focus measure
@@ -45,6 +57,9 @@ class FocusStacker:
         print(f"Radius: {radius}")
         print(f"Smoothing: {smoothing}")
         print(f"Enhance sharpness: {enhance_sharpness}")
+        if enhance_sharpness:
+            print(f"SNR values: {self.sharpening_params['snr_values']}")
+            print(f"Focus threshold: {self.sharpening_params['focus_threshold']}")
 
     def _init_color_profiles(self):
         """Initialize color profile transformations"""
@@ -137,51 +152,46 @@ class FocusStacker:
         if progress_callback:
             progress_callback(base_progress + progress_range * 0.2)
             
-        # Enhance local contrast with small tiles
-        print("Enhancing local contrast...")
-        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(2,2))  # Smaller tiles, higher contrast
+        # Reduce contrast enhancement to preserve natural appearance
+        print("Applying minimal contrast enhancement...")
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))  # Larger tiles, lower contrast
         img = clahe.apply(img)
         
-        # Calculate multi-scale gradients
-        print("Computing gradients...")
-        gradients = []
-        kernel_sizes = [3, 5]  # Focus on smaller kernels for fine detail
-        for ksize in kernel_sizes:
-            sobelx = cv2.Sobel(img, cv2.CV_64F, 1, 0, ksize=ksize)
-            sobely = cv2.Sobel(img, cv2.CV_64F, 0, 1, ksize=ksize)
-            gradient = np.sqrt(sobelx**2 + sobely**2)
-            gradients.append(gradient)
-            
-        if progress_callback:
-            progress_callback(base_progress + progress_range * 0.4)
-        
-        # Calculate multi-scale Laplacian
-        print("Computing Laplacian responses...")
-        laplacians = []
-        kernel_sizes = [3, 5]  # Focus on smaller kernels
-        for ksize in kernel_sizes:
-            laplacian = cv2.Laplacian(img, cv2.CV_64F, ksize=ksize)
-            laplacians.append(np.abs(laplacian))
-            
-        if progress_callback:
-            progress_callback(base_progress + progress_range * 0.6)
-        
-        # Combine measures with emphasis on high frequencies
-        print("Combining focus measures...")
+        # Calculate focus measure using multiple techniques
+        print("Computing focus measures...")
         focus_map = np.zeros_like(img, dtype=np.float32)
         
-        # Weight gradients heavily to emphasize edges
-        for gradient in gradients:
-            focus_map += gradient * 3.0  # Stronger weight for edge detection
+        # 1. Modified Laplacian for fine detail
+        lap_kernel = np.array([[0, -1, 0], [-1, 4, -1], [0, -1, 0]], dtype=np.float32)
+        modified_laplacian = np.abs(cv2.filter2D(img.astype(np.float32), -1, lap_kernel))
+        
+        # 2. Gradient magnitude for edge strength
+        sobelx = cv2.Sobel(img, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(img, cv2.CV_64F, 0, 1, ksize=3)
+        gradient = np.sqrt(sobelx**2 + sobely**2)
+        
+        # 3. Local variance for texture detail
+        mean = cv2.boxFilter(img.astype(np.float32), -1, (3, 3))
+        mean_sq = cv2.boxFilter(img.astype(np.float32) ** 2, -1, (3, 3))
+        variance = mean_sq - mean ** 2
+        
+        if progress_callback:
+            progress_callback(base_progress + progress_range * 0.4)
             
-        # Weight Laplacians to emphasize fine details
-        for i, laplacian in enumerate(laplacians):
-            weight = 2.0 if i == 0 else 1.0  # More weight to smaller kernel
-            focus_map += laplacian * weight
-            
-        # Normalize and enhance high frequencies
+        # Combine measures with balanced weights
+        focus_map = (modified_laplacian * 0.4 + 
+                    gradient * 0.4 + 
+                    variance * 0.2)  # Less weight on variance to reduce noise
+        
+        # Normalize with gentler curve
         focus_map = cv2.normalize(focus_map, None, 0, 1, cv2.NORM_MINMAX)
-        focus_map = np.power(focus_map, 0.5)  # Increase contrast in high-frequency regions
+        focus_map = np.power(focus_map, 0.8)  # Slightly reduced contrast enhancement
+        
+        # Apply minimal smoothing to reduce noise while preserving edges
+        # Convert to 8-bit for bilateral filter
+        focus_map_8bit = (focus_map * 255).astype(np.uint8)
+        focus_map_8bit = cv2.bilateralFilter(focus_map_8bit, 5, 25, 25)
+        focus_map = focus_map_8bit.astype(np.float32) / 255
         
         if progress_callback:
             progress_callback(base_progress + progress_range * 0.8)
@@ -192,48 +202,82 @@ class FocusStacker:
 
     def _enhance_sharpness_multiscale(self, img):
         """
-        Enhance sharpness using multi-scale approach with deconvolution and unsharp masking
+        Enhance sharpness using adaptive multi-scale approach with strong edge preservation
         @param img Input image
         @return Enhanced image
         """
-        # Parameters for multi-scale enhancement
-        kernel_sizes = [3, 5, 7]  # Multiple scales
-        snr_values = [200, 150, 100]  # Stronger to weaker enhancement
+        # Parameters for balanced multi-scale enhancement
+        kernel_sizes = [3, 5]  # Focus on smaller kernels for finer detail
+        snr_values = self.sharpening_params['snr_values']  # Get from parameters
         
         enhanced = img.copy()
         
-        # Apply deconvolution at multiple scales
-        for size, snr in zip(kernel_sizes, snr_values):
-            # Create point spread function (PSF)
+        # Step 1: Edge-preserving decomposition using bilateral filter
+        # Process each channel separately
+        base = np.zeros_like(enhanced)
+        for c in range(3):
+            # Convert to 8-bit for bilateral filter
+            channel_8bit = (enhanced[:,:,c] * 255).astype(np.uint8)
+            base_8bit = cv2.bilateralFilter(channel_8bit, 9, 75, 75)
+            base[:,:,c] = base_8bit.astype(np.float32) / 255
+        detail = enhanced - base
+        
+        # Step 2: Multi-scale enhancement with adaptive filtering
+        detail_enhanced = detail.copy()
+        
+        # Calculate edge mask for adaptive enhancement
+        # Convert to grayscale for edge detection
+        guide = cv2.cvtColor((enhanced * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        edge_mask = np.zeros_like(guide, dtype=np.float32)
+        for size in kernel_sizes:
+            sobelx = cv2.Sobel(guide, cv2.CV_32F, 1, 0, ksize=size)
+            sobely = cv2.Sobel(guide, cv2.CV_32F, 0, 1, ksize=size)
+            edge_strength = np.sqrt(sobelx**2 + sobely**2)
+            edge_mask = np.maximum(edge_mask, edge_strength)
+        
+        edge_mask = cv2.GaussianBlur(edge_mask, (0,0), 1.0)
+        edge_mask = cv2.normalize(edge_mask, None, 0, 1, cv2.NORM_MINMAX)
+        
+        for size, snr in zip(kernel_sizes, snr_values[:len(kernel_sizes)]):
+            # Create adaptive PSF based on edge strength
             center = size // 2
             psf = np.zeros((size, size))
             psf[center, center] = 1
-            psf = cv2.GaussianBlur(psf, (size, size), 0.5)  # Smaller sigma for sharper result
+            psf = cv2.GaussianBlur(psf, (size, size), 0.5)  # Slightly sharper PSF
             psf /= psf.sum()
             
-            # Pad image
-            pad = size * 2
-            padded = np.pad(enhanced, ((pad,pad), (pad,pad)), mode='reflect')
-            
-            # Apply Wiener deconvolution
-            psf_fft = np.fft.fft2(psf, s=padded.shape)
-            img_fft = np.fft.fft2(padded)
-            psf_conj = np.conj(psf_fft)
-            power = np.abs(psf_fft) ** 2
-            img_deconv = np.real(np.fft.ifft2(
-                img_fft * psf_conj / (power + 1/snr)
-            ))
-            
-            # Crop and update result
-            deconv = img_deconv[pad:-pad, pad:-pad]
-            enhanced = np.clip(deconv, 0, 1)
+            # Process each channel separately
+            for c in range(3):
+                # Pad detail layer
+                pad = size * 2
+                padded = np.pad(detail_enhanced[:,:,c], ((pad,pad), (pad,pad)), mode='reflect')
+                padded_edge = np.pad(edge_mask, ((pad,pad), (pad,pad)), mode='reflect')
+                
+                # Adaptive deconvolution based on edge strength
+                for _ in range(2):  # Fewer iterations for more natural results
+                    conv = cv2.filter2D(padded, -1, psf)
+                    ratio = cv2.filter2D(np.ones_like(padded) / (conv + 1e-10), -1, psf)
+                    update = padded * ratio
+                    
+                    # Apply update adaptively based on edge strength
+                    padded = padded * (1 - padded_edge) + update * padded_edge
+                
+                # Crop and update result
+                detail_enhanced[:,:,c] = np.clip(padded[pad:-pad, pad:-pad], -0.5, 0.5)  # Reduced range for more natural look
         
-        # Apply unsharp masking as final step
-        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0.5)
-        mask = enhanced - blurred
-        enhanced = enhanced + mask * 0.5  # Adjust strength here
+        # Step 3: Combine enhanced detail with base layer using edge-aware weights
+        local_contrast = cv2.Laplacian(guide, cv2.CV_32F)
+        weight = np.abs(local_contrast) * edge_mask  # Edge-aware weighting
+        weight = cv2.GaussianBlur(weight, (0,0), 1.0)
+        weight = cv2.normalize(weight, None, 0.3, 0.7, cv2.NORM_MINMAX)  # More conservative range
         
-        return np.clip(enhanced, 0, 1)
+        # Expand weight for broadcasting
+        weight = np.repeat(weight[:,:,np.newaxis], 3, axis=2)
+        
+        enhanced = base + detail_enhanced * weight
+        enhanced = np.clip(enhanced, 0, 1)
+        
+        return enhanced
 
     def _blend_images(self, aligned_images, focus_maps):
         """
@@ -251,9 +295,11 @@ class FocusStacker:
         aligned_images = np.array(aligned_images)
         focus_maps = np.array(focus_maps)
         
-        # Find regions with poor focus
+        # Find regions needing enhancement
         max_focus = np.max(focus_maps, axis=0)
-        low_focus_mask = max_focus < 0.2  # Lower threshold to catch more regions
+        low_focus_mask = max_focus < self.sharpening_params['focus_threshold']
+        # Expand mask to match image dimensions
+        low_focus_mask = np.repeat(low_focus_mask[:,:,np.newaxis], 3, axis=2)
         
         # Normalize focus maps using local contrast
         print("Computing local contrast weights...")
@@ -277,27 +323,24 @@ class FocusStacker:
         weights_sum = np.sum(weights, axis=0, keepdims=True)
         weights = np.where(weights_sum > 0, weights / (weights_sum + 1e-10), 1.0 / len(weights))
         
-        # Enhance high-confidence regions
-        print("Enhancing weight contrast...")
-        weights = np.power(weights, 3.0)  # Stronger emphasis on high confidence
+        # More balanced weight distribution
+        print("Adjusting weight distribution...")
+        weights = np.power(weights, 1.2)  # Very gentle emphasis on high confidence
         weights_sum = np.sum(weights, axis=0, keepdims=True)
         weights = weights / (weights_sum + 1e-10)
         
+        # Expand weights for proper broadcasting
+        weights = np.repeat(weights[:, :, :, np.newaxis], 3, axis=3)  # Shape: (N, H, W, 3)
+        
         # Blend images
         print("Blending images...")
-        result = np.zeros_like(aligned_images[0])
-        
-        for channel in range(3):
-            # Weight each image
-            channel_result = np.sum(aligned_images[:,:,:,channel] * weights, axis=0)
+        result = np.sum(aligned_images * weights, axis=0)  # Shape: (H, W, 3)
             
-            # Enhance sharpness in low focus regions if enabled
-            if self.enhance_sharpness and np.any(low_focus_mask):
-                print(f"Enhancing sharpness in low focus regions for channel {channel}")
-                enhanced = self._enhance_sharpness_multiscale(channel_result)
-                channel_result = np.where(low_focus_mask, enhanced, channel_result)
-                
-            result[:,:,channel] = channel_result
+        # Enhance sharpness in low focus regions if enabled
+        if self.enhance_sharpness and np.any(low_focus_mask):
+            print("Enhancing sharpness in low focus regions")
+            enhanced = self._enhance_sharpness_multiscale(result)
+            result = np.where(low_focus_mask, enhanced, result)
             
         return np.clip(result, 0, 1)
 
@@ -500,54 +543,24 @@ class FocusStacker:
         # Convert back to numpy array
         return np.array(converted).astype(np.float32) / 255
 
-    def save_image(self, img, path, format_name, color_space):
+    def save_image(self, img, path, format_name='JPEG', color_space='sRGB'):
         """
         Save processed image
         @param img Image to save
         @param path Output path
-        @param format_name Output format
+        @param format_name Output format (currently only JPEG supported)
         @param color_space Color space
         """
-        print(f"\nSaving image...")
+        print(f"\nSaving image as JPEG...")
         print(f"Path: {path}")
-        print(f"Format: {format_name}")
-        print(f"Color space: {color_space}")
         
         try:
-            if format_name in ['TIFF (16-bit)', 'PNG (16-bit)']:
-                print("Converting to 16-bit...")
-                # Convert each channel separately to prevent color noise
-                img_16bit = np.zeros(img.shape, dtype=np.uint16)
-                for channel in range(3):
-                    # Scale to 16-bit with proper rounding
-                    channel_data = np.clip(img[:,:,channel] * 65535.0 + 0.5, 0, 65535)
-                    img_16bit[:,:,channel] = channel_data.astype(np.uint16)
-                
-                print(f"Image converted to 16-bit with shape {img_16bit.shape}")
-                
-                format_type = 'TIFF' if format_name == 'TIFF (16-bit)' else 'PNG'
-                print(f"Saving as {format_type}...")
-                
-                # Create PIL image with correct mode and color profile
-                pil_img = PIL.Image.fromarray(img_16bit, mode='RGB')
-                if color_space == 'sRGB':
-                    icc = self.color_profiles['sRGB'].tobytes()
-                    pil_img.info['icc_profile'] = icc
-                
-                # Save with appropriate format-specific parameters
-                if format_type == 'TIFF':
-                    pil_img.save(path, format=format_type, tiffinfo={317: 2}, compression='tiff_deflate')
-                else:  # PNG
-                    pil_img.save(path, format=format_type, optimize=True)
-            else:
-                print("Converting to 8-bit JPEG...")
-                img_8bit = (img * 255).astype(np.uint8)
-                print(f"Image converted to 8-bit with shape {img_8bit.shape}")
-                
-                print("Saving as JPEG...")
-                pil_img = PIL.Image.fromarray(img_8bit, mode='RGB')
-                pil_img.save(path, format='JPEG', quality=95, optimize=True)
-                
+            # Convert to 8-bit with careful rounding
+            img_8bit = np.clip(img * 255.0 + 0.5, 0, 255).astype(np.uint8)
+            
+            # Save as high-quality JPEG
+            pil_img = PIL.Image.fromarray(img_8bit, mode='RGB')
+            pil_img.save(path, format='JPEG', quality=95, optimize=True)
             print(f"Successfully saved image to {path}")
             
         except Exception as e:
