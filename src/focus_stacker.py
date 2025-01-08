@@ -270,24 +270,38 @@ class FocusStacker:
             
             focus_maps.append(focus_map)
             
-        # Weight maps by scale importance with stronger emphasis on finest details
-        weights = [0.5, 0.3, 0.15, 0.05]  # Increased weight for finest scale
-        final_focus = cp.zeros_like(focus_maps[0])
-        
-        # Enhanced multi-scale combination
-        for i, (fm, w) in enumerate(zip(focus_maps, weights)):
-            # Apply non-linear enhancement to each scale
-            enhanced = cp.power(fm, 0.8)  # Less aggressive power for better detail preservation
-            # Apply local contrast enhancement
-            local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(enhanced), (0,0), 1.0))
-            local_detail = enhanced - local_mean
-            enhanced = enhanced + local_detail * 0.5  # Boost local contrast
-            final_focus += enhanced * w
+            # Weight maps by scale importance with adaptive weighting for photogrammetry
+            weights = [0.6, 0.25, 0.1, 0.05]  # Stronger emphasis on primary detail level
+            final_focus = cp.zeros_like(focus_maps[0])
             
-        # Multi-scale contrast enhancement optimized for photogrammetry
-        focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
-        # Apply gentler contrast enhancement to preserve more gradients
-        focus_map = cp.power(focus_map, 0.7)  # Less aggressive power for better detail preservation
+            # Enhanced multi-scale combination with subject-aware weighting
+            for i, (fm, w) in enumerate(zip(focus_maps, weights)):
+                # Calculate local variance to identify high-detail regions (likely the main subject)
+                local_var = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm * fm), (15, 15), 0)) - \
+                          cp.power(cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm), (15, 15), 0)), 2)
+                
+                # Create detail-aware mask
+                detail_mask = cp.clip((local_var - cp.min(local_var)) / (cp.max(local_var) - cp.min(local_var) + 1e-6), 0.3, 1.0)
+                
+                # Apply stronger enhancement to high-detail areas
+                enhanced = cp.power(fm, 0.7 + 0.3 * detail_mask)  # Adaptive power based on detail level
+                
+                # Apply local contrast enhancement with detail-aware strength
+                local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(enhanced), (0,0), 1.0))
+                local_detail = enhanced - local_mean
+                enhanced = enhanced + local_detail * (0.3 + 0.4 * detail_mask)  # Adaptive contrast boost
+                
+                final_focus += enhanced * w * (0.7 + 0.3 * detail_mask)  # Detail-weighted combination
+            
+            # Multi-scale contrast enhancement with subject-aware normalization
+            focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
+            
+            # Calculate detail-aware normalization mask
+            detail_mask = cp.asarray(cv2.GaussianBlur(cp.asnumpy(focus_map * focus_map), (25, 25), 0))
+            detail_mask = (detail_mask - cp.min(detail_mask)) / (cp.max(detail_mask) - cp.min(detail_mask) + 1e-6)
+            
+            # Apply adaptive enhancement based on detail level
+            focus_map = cp.power(focus_map, 0.5 + 0.4 * detail_mask)  # More enhancement for high-detail areas
         
         return cp.asnumpy(focus_map).astype(np.float32)
 
