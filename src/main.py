@@ -51,10 +51,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.image_paths = []
         
-        # Default stacking parameters optimized for small objects
-        self.method = 'B'  # Depth map method works best for fine details
-        self.radius = 6    # Smaller radius for sharper details
-        self.smoothing = 2 # Less smoothing to preserve edges
+        # Default stacking parameters optimized for maximum sharpness
+        self.method = 'A'  # Weighted average method for best results
+        self.radius = 3    # Very small radius for maximum sharpness
+        self.smoothing = 1 # Minimal smoothing to preserve edges
         
         # Create stacker with default parameters
         self.stacker = FocusStacker(
@@ -94,7 +94,7 @@ class MainWindow(QMainWindow):
         # Method selection
         method_label = QLabel('Method:')
         self.method_combo = QComboBox()
-        self.method_combo.addItems(['A', 'B'])  # Remove method C as it's not fully implemented
+        self.method_combo.addItems(['A'])  # Only use weighted average method
         self.method_combo.setCurrentText(self.method)
         self.method_combo.currentTextChanged.connect(self.update_stacker)
         
@@ -109,7 +109,7 @@ class MainWindow(QMainWindow):
         self.radius_combo.addItems([str(i) for i in range(1, 21)])
         self.radius_combo.setCurrentText(str(self.radius))
         self.radius_combo.currentTextChanged.connect(self.update_stacker)
-        radius_desc = QLabel("Lower values (4-8) preserve fine details, higher values for smoother blending")
+        radius_desc = QLabel("Lower values (2-4) maximize sharpness, higher values for smoother blending")
         radius_desc.setWordWrap(True)
         
         # Smoothing control
@@ -393,11 +393,7 @@ class MainWindow(QMainWindow):
 
     def update_method_description(self, method):
         """Update the method description label based on selected method"""
-        descriptions = {
-            'A': "Weighted average based on contrast. Best for simple surfaces and preserving colors.",
-            'B': "Depth map based on sharpest pixels. Best for most cases, requires consecutive order."
-        }
-        self.method_desc.setText(descriptions[method])
+        self.method_desc.setText("Weighted average based on contrast. Optimized for preserving sharp details.")
         
     def update_stacker(self):
         """Update stacker with current parameter values"""

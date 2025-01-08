@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import cv2
 import numpy as np
 import os
@@ -14,19 +16,17 @@ class FocusStacker:
     @brief Implements focus stacking algorithm to combine multiple images
     """
     
-    def __init__(self, method='B', radius=8, smoothing=4):
+    def __init__(self, method='A', radius=8, smoothing=4):
         """
         Initialize focus stacker with parameters
-        @param method Focus stacking method ('A', 'B', or 'C')
+        @param method Focus stacking method ('A')
             A: Weighted average based on contrast
-            B: Depth map based on sharpest pixels
-            C: Pyramid-based approach for complex cases
         @param radius Size of area around each pixel for focus detection (1-20)
         @param smoothing Amount of smoothing for transitions (1-10)
         """
         # Validate parameters
-        if method not in ['A', 'B', 'C']:
-            raise ValueError("Method must be 'A', 'B', or 'C'")
+        if method != 'A':
+            raise ValueError("Method must be 'A'")
         if not 1 <= radius <= 20:
             raise ValueError("Radius must be between 1 and 20")
         if not 1 <= smoothing <= 10:
@@ -80,11 +80,11 @@ class FocusStacker:
         # Convert reference to grayscale once
         ref_gray = cv2.cvtColor((reference * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
         
-        # Apply Gaussian blur to reduce noise in alignment
-        ref_gray = cv2.GaussianBlur(ref_gray, (3, 3), 0)
+        # Apply minimal blur to reduce noise in alignment
+        ref_gray = cv2.GaussianBlur(ref_gray, (3, 3), 0.5)  # Reduced blur
         
         # Enhance contrast for better feature detection
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4,4))  # Smaller tiles
         ref_gray = clahe.apply(ref_gray)
         
         for i, img in enumerate(images[1:], 1):
@@ -92,7 +92,7 @@ class FocusStacker:
             
             # Convert to grayscale and enhance
             img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-            img_gray = cv2.GaussianBlur(img_gray, (3, 3), 0)
+            img_gray = cv2.GaussianBlur(img_gray, (3, 3), 0.5)  # Reduced blur
             img_gray = clahe.apply(img_gray)
             
             try:
@@ -119,7 +119,7 @@ class FocusStacker:
 
     def _focus_measure(self, img, progress_callback=None, base_progress=0, progress_range=25):
         """
-        Calculate focus measure optimized for small objects and reflective surfaces
+        Calculate focus measure optimized for sharp detail preservation
         @param img Input image
         @param progress_callback Optional callback for progress updates
         @param base_progress Base progress value (0-100)
@@ -141,32 +141,19 @@ class FocusStacker:
         if progress_callback:
             progress_callback(base_progress + progress_range * 0.2)
             
-        # Enhance local contrast
+        # Enhance local contrast with small tiles
         print("Enhancing local contrast...")
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4,4))  # Smaller tiles for finer detail
+        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(2,2))  # Smaller tiles, higher contrast
         img = clahe.apply(img)
         
-        # Denoise while preserving edges
-        print("Denoising...")
-        img = cv2.fastNlMeansDenoising(img, None, 5, 7, 21)
-        
-        # Calculate multi-directional gradients
+        # Calculate multi-scale gradients
         print("Computing gradients...")
         gradients = []
-        angles = [0, 45, 90, 135]  # Multiple angles for better edge detection
-        for angle in angles:
-            # Rotate image
-            matrix = cv2.getRotationMatrix2D((img.shape[1]/2, img.shape[0]/2), angle, 1)
-            rotated = cv2.warpAffine(img, matrix, (img.shape[1], img.shape[0]))
-            
-            # Calculate gradient
-            sobelx = cv2.Sobel(rotated, cv2.CV_64F, 1, 0, ksize=3)
-            sobely = cv2.Sobel(rotated, cv2.CV_64F, 0, 1, ksize=3)
+        kernel_sizes = [3, 5]  # Focus on smaller kernels for fine detail
+        for ksize in kernel_sizes:
+            sobelx = cv2.Sobel(img, cv2.CV_64F, 1, 0, ksize=ksize)
+            sobely = cv2.Sobel(img, cv2.CV_64F, 0, 1, ksize=ksize)
             gradient = np.sqrt(sobelx**2 + sobely**2)
-            
-            # Rotate back
-            matrix = cv2.getRotationMatrix2D((gradient.shape[1]/2, gradient.shape[0]/2), -angle, 1)
-            gradient = cv2.warpAffine(gradient, matrix, (gradient.shape[1], gradient.shape[0]))
             gradients.append(gradient)
             
         if progress_callback:
@@ -175,7 +162,7 @@ class FocusStacker:
         # Calculate multi-scale Laplacian
         print("Computing Laplacian responses...")
         laplacians = []
-        kernel_sizes = [3, 5, 7, 9]  # Multiple scales for different feature sizes
+        kernel_sizes = [3, 5]  # Focus on smaller kernels
         for ksize in kernel_sizes:
             laplacian = cv2.Laplacian(img, cv2.CV_64F, ksize=ksize)
             laplacians.append(np.abs(laplacian))
@@ -183,59 +170,41 @@ class FocusStacker:
         if progress_callback:
             progress_callback(base_progress + progress_range * 0.6)
         
-        # Combine measures with weights
+        # Combine measures with emphasis on high frequencies
         print("Combining focus measures...")
         focus_map = np.zeros_like(img, dtype=np.float32)
         
-        # Weight gradients by angle importance
+        # Weight gradients heavily to emphasize edges
         for gradient in gradients:
-            focus_map += gradient * 0.7  # Strong weight for edge detection
+            focus_map += gradient * 3.0  # Stronger weight for edge detection
             
-        # Weight Laplacians by scale importance
+        # Weight Laplacians to emphasize fine details
         for i, laplacian in enumerate(laplacians):
-            # Give more weight to medium scales
-            weight = 1.0 if i in [1, 2] else 0.5
+            weight = 2.0 if i == 0 else 1.0  # More weight to smaller kernel
             focus_map += laplacian * weight
             
-        # Normalize and enhance contrast
+        # Normalize and enhance high frequencies
         focus_map = cv2.normalize(focus_map, None, 0, 1, cv2.NORM_MINMAX)
-        focus_map = np.power(focus_map, 0.8)  # Gamma correction to enhance mid-range values
+        focus_map = np.power(focus_map, 0.5)  # Increase contrast in high-frequency regions
         
         if progress_callback:
             progress_callback(base_progress + progress_range * 0.8)
         
-        # Apply bilateral filter to preserve edges while smoothing noise
-        print("Refining focus map...")
-        focus_map = cv2.bilateralFilter(focus_map.astype(np.float32), 5, 0.1, 5)
-        
-        if progress_callback:
-            progress_callback(base_progress + progress_range)
-        
+        # No smoothing to preserve maximum sharpness
         print("Focus measure calculation complete")
         return focus_map.astype(np.float32)
 
     def _blend_images(self, aligned_images, focus_maps):
         """
-        Blend images based on focus measures using selected method
+        Blend images using weighted average method
         @param aligned_images List of aligned images
         @param focus_maps List of focus measure maps
         @return Blended image
         """
-        print(f"\nBlending images using method {self.method}...")
+        print("\nBlending images...")
         print(f"Number of images: {len(aligned_images)}")
         print(f"Image shape: {aligned_images[0].shape}")
         print(f"Focus map shape: {focus_maps[0].shape}")
-        
-        if self.method == 'A':
-            return self._blend_weighted_average(aligned_images, focus_maps)
-        elif self.method == 'B':
-            return self._blend_depth_map(aligned_images, focus_maps)
-        else:  # method C
-            return self._blend_pyramid(aligned_images, focus_maps)
-            
-    def _blend_weighted_average(self, aligned_images, focus_maps):
-        """Method A: Enhanced weighted average for small objects and reflective surfaces"""
-        print("Using enhanced weighted average blending...")
         
         # Convert to numpy arrays
         aligned_images = np.array(aligned_images)
@@ -263,179 +232,19 @@ class FocusStacker:
         weights_sum = np.sum(weights, axis=0, keepdims=True)
         weights = np.where(weights_sum > 0, weights / (weights_sum + 1e-10), 1.0 / len(weights))
         
-        # Apply non-linear enhancement to increase contrast in weight maps
+        # Enhance high-confidence regions
         print("Enhancing weight contrast...")
-        weights = np.power(weights, 1.5)  # Increase influence of high-confidence regions
+        weights = np.power(weights, 3.0)  # Stronger emphasis on high confidence
         weights_sum = np.sum(weights, axis=0, keepdims=True)
         weights = weights / (weights_sum + 1e-10)
         
-        # Blend images
+        # Blend images with no filtering
         print("Blending images...")
         result = np.zeros_like(aligned_images[0])
         
         for channel in range(3):
             # Weight each image
-            weighted_sum = np.sum(aligned_images[:,:,:,channel] * weights, axis=0)
-            
-            # Apply bilateral filter to reduce noise while preserving edges
-            result[:,:,channel] = cv2.bilateralFilter(
-                weighted_sum.astype(np.float32), 
-                5, 0.1, 5
-            )
-            
-        # Apply guided filter for final refinement
-        print("Refining result...")
-        filtered_result = np.zeros_like(result)
-        
-        # Use maximum focus map as guide
-        guide = np.max(focus_maps, axis=0)
-        guide = cv2.bilateralFilter(guide.astype(np.float32), 5, 0.1, 5)
-        
-        for channel in range(3):
-            filtered_result[:,:,channel] = self._guided_filter(
-                result[:,:,channel],
-                guide
-            )
-            
-        return np.clip(filtered_result, 0, 1)
-        
-    def _blend_depth_map(self, aligned_images, focus_maps):
-        """Method B: Enhanced depth map for small objects and reflective surfaces"""
-        print("Using enhanced depth map blending...")
-        
-        # Convert focus maps to numpy array
-        focus_maps = np.array(focus_maps)
-        
-        # Normalize focus maps using local statistics
-        print("Normalizing focus maps...")
-        kernel_size = max(3, self.window_size // 2)
-        kernel = np.ones((kernel_size, kernel_size), dtype=np.float32) / (kernel_size * kernel_size)
-        
-        normalized_maps = []
-        for focus_map in focus_maps:
-            # Calculate local mean and std
-            local_mean = cv2.filter2D(focus_map, -1, kernel)
-            local_std = np.sqrt(cv2.filter2D(focus_map**2, -1, kernel) - local_mean**2)
-            
-            # Normalize locally
-            normalized = (focus_map - local_mean) / (local_std + 1e-6)
-            normalized_maps.append(normalized)
-            
-        focus_maps = np.array(normalized_maps)
-        
-        # Find indices of maximum focus for each pixel
-        print("Creating depth map...")
-        max_focus = np.argmax(focus_maps, axis=0)
-        
-        # Calculate confidence map using multiple metrics
-        print("Computing confidence map...")
-        max_vals = np.max(focus_maps, axis=0)
-        second_max = np.partition(focus_maps, -2, axis=0)[-2]
-        
-        # Primary confidence from difference between max and second max
-        confidence = max_vals - second_max
-        
-        # Additional confidence from local consistency
-        consistency = np.zeros_like(confidence)
-        window = 5
-        pad = window // 2
-        for i in range(pad, confidence.shape[0] - pad):
-            for j in range(pad, confidence.shape[1] - pad):
-                # Count matching indices in window
-                window_indices = max_focus[i-pad:i+pad+1, j-pad:j+pad+1]
-                center_index = max_focus[i,j]
-                consistency[i,j] = np.sum(window_indices == center_index) / window**2
-                
-        # Combine confidence metrics
-        confidence = confidence * np.power(consistency, 0.5)
-        
-        # Smooth confidence map while preserving edges
-        print("Refining confidence map...")
-        confidence = cv2.bilateralFilter(confidence.astype(np.float32), 5, 0.1, 5)
-        
-        # Create empty result image
-        result = np.zeros_like(aligned_images[0])
-        
-        # Process each color channel separately
-        for channel in range(3):
-            print(f"Processing channel {channel}")
-            # For each source image
-            for i in range(len(aligned_images)):
-                # Create mask where this image has maximum focus
-                mask = (max_focus == i)
-                # Apply mask to this channel
-                result[:,:,channel][mask] = aligned_images[i][:,:,channel][mask]
-        
-        print("Smoothing transitions...")
-        # Apply guided filter for each channel
-        filtered_result = np.zeros_like(result)
-        for channel in range(3):
-            # Use both confidence and original image as guide
-            guide = cv2.bilateralFilter(result[:,:,channel], 5, 0.1, 5)
-            filtered_result[:,:,channel] = self._guided_filter(
-                result[:,:,channel],
-                (confidence + guide) / 2
-            )
-            
-        return np.clip(filtered_result, 0, 1)
-        
-    def _blend_pyramid(self, aligned_images, focus_maps):
-        """Method C: Pyramid approach for complex cases"""
-        print("Using pyramid blending...")
-        
-        # Convert to numpy arrays
-        focus_maps = np.array(focus_maps)
-        
-        # Create Gaussian pyramids for images and focus maps
-        levels = 4  # Number of pyramid levels
-        image_pyramids = []
-        focus_pyramids = []
-        
-        print("Building pyramids...")
-        for img in aligned_images:
-            pyramid = [img]
-            for level in range(levels-1):
-                pyramid.append(cv2.pyrDown(pyramid[-1]))
-            image_pyramids.append(pyramid)
-            
-        for focus in focus_maps:
-            pyramid = [focus]
-            for level in range(levels-1):
-                pyramid.append(cv2.pyrDown(pyramid[-1]))
-            focus_pyramids.append(pyramid)
-            
-        # Blend pyramids from coarse to fine
-        print("Blending pyramids...")
-        result = np.zeros_like(aligned_images[0])
-        
-        for channel in range(3):
-            print(f"Processing channel {channel}")
-            channel_result = np.zeros_like(result[:,:,channel])
-            
-            # Start with coarsest level
-            level_weights = focus_pyramids[-1]
-            level_weights = level_weights / (np.sum(level_weights, axis=0) + 1e-10)
-            
-            channel_result = np.zeros_like(image_pyramids[0][-1][:,:,channel])
-            for i in range(len(aligned_images)):
-                channel_result += image_pyramids[i][-1][:,:,channel] * level_weights[i]
-                
-            # Refine result through pyramid levels
-            for level in range(levels-2, -1, -1):
-                channel_result = cv2.pyrUp(channel_result)
-                
-                # Blend at current level
-                level_weights = focus_pyramids[level]
-                level_weights = level_weights / (np.sum(level_weights, axis=0) + 1e-10)
-                
-                current_result = np.zeros_like(image_pyramids[0][level][:,:,channel])
-                for i in range(len(aligned_images)):
-                    current_result += image_pyramids[i][level][:,:,channel] * level_weights[i]
-                    
-                # Combine with upsampled result
-                channel_result = 0.7 * channel_result + 0.3 * current_result
-                
-            result[:,:,channel] = channel_result
+            result[:,:,channel] = np.sum(aligned_images[:,:,:,channel] * weights, axis=0)
             
         return np.clip(result, 0, 1)
 
