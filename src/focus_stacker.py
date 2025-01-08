@@ -39,8 +39,8 @@ class FocusStacker:
         # Set default sharpening parameters if none provided
         if sharpening_params is None:
             self.sharpening_params = {
-                'snr_values': [100, 80, 60],  # More conservative values
-                'focus_threshold': 0.3  # More selective enhancement
+                'snr_values': [120],  # Single, more conservative SNR value
+                'focus_threshold': 0.2  # More selective enhancement threshold
             }
         else:
             self.sharpening_params = sharpening_params
@@ -207,7 +207,7 @@ class FocusStacker:
         @return Enhanced image
         """
         # Parameters for balanced multi-scale enhancement
-        kernel_sizes = [3, 5]  # Focus on smaller kernels for finer detail
+        kernel_sizes = [3]  # Use single small kernel for more controlled enhancement
         snr_values = self.sharpening_params['snr_values']  # Get from parameters
         
         enhanced = img.copy()
@@ -218,7 +218,8 @@ class FocusStacker:
         for c in range(3):
             # Convert to 8-bit for bilateral filter
             channel_8bit = (enhanced[:,:,c] * 255).astype(np.uint8)
-            base_8bit = cv2.bilateralFilter(channel_8bit, 9, 75, 75)
+            # More conservative bilateral filter with smaller sigmas
+            base_8bit = cv2.bilateralFilter(channel_8bit, 5, 15, 15)
             base[:,:,c] = base_8bit.astype(np.float32) / 255
         detail = enhanced - base
         
@@ -243,7 +244,7 @@ class FocusStacker:
             center = size // 2
             psf = np.zeros((size, size))
             psf[center, center] = 1
-            psf = cv2.GaussianBlur(psf, (size, size), 0.5)  # Slightly sharper PSF
+            psf = cv2.GaussianBlur(psf, (size, size), 0.3)  # Sharper PSF for finer detail
             psf /= psf.sum()
             
             # Process each channel separately
@@ -254,7 +255,7 @@ class FocusStacker:
                 padded_edge = np.pad(edge_mask, ((pad,pad), (pad,pad)), mode='reflect')
                 
                 # Adaptive deconvolution based on edge strength
-                for _ in range(2):  # Fewer iterations for more natural results
+                for _ in range(1):  # Single iteration to prevent over-enhancement
                     conv = cv2.filter2D(padded, -1, psf)
                     ratio = cv2.filter2D(np.ones_like(padded) / (conv + 1e-10), -1, psf)
                     update = padded * ratio
@@ -263,13 +264,18 @@ class FocusStacker:
                     padded = padded * (1 - padded_edge) + update * padded_edge
                 
                 # Crop and update result
-                detail_enhanced[:,:,c] = np.clip(padded[pad:-pad, pad:-pad], -0.5, 0.5)  # Reduced range for more natural look
+                detail_enhanced[:,:,c] = np.clip(padded[pad:-pad, pad:-pad], -0.3, 0.3)  # More conservative range for natural look
         
-        # Step 3: Combine enhanced detail with base layer using edge-aware weights
-        local_contrast = cv2.Laplacian(guide, cv2.CV_32F)
-        weight = np.abs(local_contrast) * edge_mask  # Edge-aware weighting
-        weight = cv2.GaussianBlur(weight, (0,0), 1.0)
-        weight = cv2.normalize(weight, None, 0.3, 0.7, cv2.NORM_MINMAX)  # More conservative range
+        # Step 3: Combine enhanced detail with base layer using refined edge-aware weights
+        # Calculate local structure tensor for better edge detection
+        dx = cv2.Sobel(guide, cv2.CV_32F, 1, 0, ksize=3)
+        dy = cv2.Sobel(guide, cv2.CV_32F, 0, 1, ksize=3)
+        local_structure = np.sqrt(dx*dx + dy*dy)
+        
+        # Combine with edge mask for more precise edge weighting
+        weight = local_structure * edge_mask
+        weight = cv2.GaussianBlur(weight, (0,0), 0.5)  # Smaller sigma for less spread
+        weight = cv2.normalize(weight, None, 0.45, 0.55, cv2.NORM_MINMAX)  # Very conservative range
         
         # Expand weight for broadcasting
         weight = np.repeat(weight[:,:,np.newaxis], 3, axis=2)
@@ -325,7 +331,7 @@ class FocusStacker:
         
         # More balanced weight distribution
         print("Adjusting weight distribution...")
-        weights = np.power(weights, 1.2)  # Very gentle emphasis on high confidence
+        weights = np.power(weights, 1.4)  # Stronger emphasis on high confidence regions
         weights_sum = np.sum(weights, axis=0, keepdims=True)
         weights = weights / (weights_sum + 1e-10)
         
