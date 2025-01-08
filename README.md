@@ -14,7 +14,7 @@ python src/main.py
 2. Using the tool:
    - Click "Select Images" to choose your focus stack images
    - Images should be taken at different focus distances of the same subject
-   - Name your images with sequential numbers (e.g., scan_1.jpg, scan_2.jpg, etc.)
+   - Name your images with sequential numbers (e.g., scan_1.jpg, scan_2.jpg, etc.) For best results check the output filenames of your Openscanner, should be ok.
    - All images in a stack should be taken with the same camera settings
    - Recommended: 5-15 images per stack with small focus steps
 
