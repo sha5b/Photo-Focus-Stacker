@@ -194,9 +194,42 @@ class FocusStacker:
         print("Focus measure calculation complete")
         return focus_map.astype(np.float32)
 
+    def _enhance_sharpness(self, img, psf_size=5, snr=100):
+        """
+        Enhance sharpness using Wiener deconvolution
+        @param img Input image
+        @param psf_size Size of point spread function
+        @param snr Signal to noise ratio
+        @return Enhanced image
+        """
+        # Create point spread function (PSF)
+        center = psf_size // 2
+        psf = np.zeros((psf_size, psf_size))
+        psf[center, center] = 1
+        psf = cv2.GaussianBlur(psf, (psf_size, psf_size), 1.0)
+        psf /= psf.sum()
+        
+        # Pad image to avoid boundary effects
+        pad = psf_size * 2
+        padded = np.pad(img, ((pad,pad), (pad,pad)), mode='reflect')
+        
+        # Apply Wiener deconvolution
+        psf_fft = np.fft.fft2(psf, s=padded.shape)
+        img_fft = np.fft.fft2(padded)
+        psf_conj = np.conj(psf_fft)
+        power = np.abs(psf_fft) ** 2
+        img_deconv = np.real(np.fft.ifft2(
+            img_fft * psf_conj / (power + 1/snr)
+        ))
+        
+        # Crop back to original size and normalize
+        result = img_deconv[pad:-pad, pad:-pad]
+        result = np.clip(result, 0, 1)
+        return result
+
     def _blend_images(self, aligned_images, focus_maps):
         """
-        Blend images using weighted average method
+        Blend images using weighted average method with sharpness enhancement
         @param aligned_images List of aligned images
         @param focus_maps List of focus measure maps
         @return Blended image
@@ -209,6 +242,10 @@ class FocusStacker:
         # Convert to numpy arrays
         aligned_images = np.array(aligned_images)
         focus_maps = np.array(focus_maps)
+        
+        # Find regions with poor focus
+        max_focus = np.max(focus_maps, axis=0)
+        low_focus_mask = max_focus < 0.3  # Threshold for poor focus
         
         # Normalize focus maps using local contrast
         print("Computing local contrast weights...")
@@ -238,13 +275,21 @@ class FocusStacker:
         weights_sum = np.sum(weights, axis=0, keepdims=True)
         weights = weights / (weights_sum + 1e-10)
         
-        # Blend images with no filtering
+        # Blend images
         print("Blending images...")
         result = np.zeros_like(aligned_images[0])
         
         for channel in range(3):
             # Weight each image
-            result[:,:,channel] = np.sum(aligned_images[:,:,:,channel] * weights, axis=0)
+            channel_result = np.sum(aligned_images[:,:,:,channel] * weights, axis=0)
+            
+            # Enhance sharpness in low focus regions
+            if np.any(low_focus_mask):
+                print(f"Enhancing sharpness in low focus regions for channel {channel}")
+                enhanced = self._enhance_sharpness(channel_result)
+                channel_result = np.where(low_focus_mask, enhanced, channel_result)
+                
+            result[:,:,channel] = channel_result
             
         return np.clip(result, 0, 1)
 
