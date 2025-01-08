@@ -177,15 +177,35 @@ class FocusStacker:
             else:
                 gpu_scaled = gpu_img
                 
-            # High-frequency components extraction
-            high_freq = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
-                cp.fft.fft2(gpu_scaled) * cp.fft.fft2(highfreq_kernel, s=gpu_scaled.shape)
-            ))))
+            # Pyramid decomposition for better detail analysis
+            pyramid_levels = 3
+            pyramids = []
+            current = gpu_scaled.copy()
             
-            # Edge detection with enhanced sensitivity
-            edges = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
-                cp.fft.fft2(gpu_scaled) * cp.fft.fft2(laplace_kernel, s=gpu_scaled.shape)
-            ))))
+            for _ in range(pyramid_levels):
+                # Gaussian blur for next level
+                blurred = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current), (5,5), 0))
+                # High-frequency residual
+                residual = current - blurred
+                pyramids.append(residual)
+                current = cp.asarray(cv2.resize(cp.asnumpy(blurred), (blurred.shape[1]//2, blurred.shape[0]//2)))
+            
+            # Enhanced frequency analysis
+            high_freq = cp.zeros_like(gpu_scaled)
+            for i, residual in enumerate(pyramids):
+                if i > 0:
+                    residual = cp.asarray(cv2.resize(cp.asnumpy(residual), (gpu_scaled.shape[1], gpu_scaled.shape[0])))
+                weight = 1.0 / (2 ** i)  # Higher weight for finer details
+                high_freq += weight * cp.abs(residual)
+            
+            # Multi-scale edge detection
+            edges = cp.zeros_like(gpu_scaled)
+            for sigma in [0.5, 1.0, 2.0]:
+                blurred = cp.asarray(cv2.GaussianBlur(cp.asnumpy(gpu_scaled), (0,0), sigma))
+                edge = cp.abs(cp.fft.fftshift(cp.real(cp.fft.ifft2(
+                    cp.fft.fft2(blurred) * cp.fft.fft2(laplace_kernel, s=blurred.shape)
+                ))))
+                edges += edge / sigma  # Weight by scale
             
             # Local contrast enhancement
             local_std = cp.zeros_like(gpu_scaled)
@@ -267,26 +287,58 @@ class FocusStacker:
         final_std = float(cp.std(result))
         print(f"Final stats - mean: {final_mean:.3f}, std: {final_std:.3f}")
         
-        # Enhanced sharpening with brightness preservation
+        # Compute focus-aware sharpening mask with proper shape
+        focus_mask = cp.zeros_like(result[...,0])  # Single channel
+        for fm in gpu_focus:
+            focus_mask += (1.0 - fm)  # Higher values for out-of-focus regions
+        focus_mask /= len(gpu_focus)
+        focus_mask = cp.clip(focus_mask, 0.3, 1.0)  # Ensure minimum sharpening
+        focus_mask = focus_mask[..., None]  # Add channel dimension
+        
+        # Multi-scale adaptive sharpening
         result_sharp = cp.zeros_like(result)
         
-        # First pass: High-frequency enhancement with reduced strength
+        # First pass: Detail recovery in out-of-focus areas
         for c in range(3):
-            high_freq = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result[...,c]) * cp.fft.fft2(highfreq_kernel, s=result[...,c].shape)
-            ))
-            result_sharp[...,c] = result[...,c] + 0.2 * high_freq
+            # Pyramid decomposition
+            current = result[...,c]
+            detail_levels = []
             
-        # Second pass: Controlled sharpening
+            for _ in range(3):
+                blurred = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current), (5,5), 0))
+                detail = current - blurred
+                detail_levels.append(detail)
+                current = cp.asarray(cv2.resize(cp.asnumpy(blurred), (blurred.shape[1]//2, blurred.shape[0]//2)))
+            
+            # Enhanced detail reconstruction
+            enhanced = result[...,c].copy()
+            for i, detail in enumerate(detail_levels):
+                if i > 0:
+                    detail = cp.asarray(cv2.resize(cp.asnumpy(detail), (result.shape[1], result.shape[0])))
+                enhancement = detail * (0.6 * (i + 1))  # Increased enhancement strength
+                enhanced += enhancement * focus_mask[...,0]  # Use single channel for enhancement
+            
+            result_sharp[...,c] = enhanced
+        
+        # Second pass: Adaptive sharpening
         result_sharp2 = cp.zeros_like(result)
         for c in range(3):
+            # Apply stronger sharpening in out-of-focus areas
             sharp = cp.real(cp.fft.ifft2(
                 cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(sharp_kernel, s=result_sharp[...,c].shape)
             ))
-            result_sharp2[...,c] = result_sharp[...,c] + 0.3 * sharp
+            # Apply stronger sharpening with high-frequency boost
+            sharp_strength = 0.7 * focus_mask[...,0]  # Increased sharpening strength
             
-        # Final blend with reduced strength to preserve brightness
-        alpha = 0.4  # Reduced sharpening strength
+            # Additional high-frequency enhancement
+            high_freq = cp.real(cp.fft.ifft2(
+                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(highfreq_kernel, s=result_sharp[...,c].shape)
+            ))
+            high_freq_strength = 0.3 * focus_mask[...,0]  # High-frequency boost in out-of-focus areas
+            result_sharp2[...,c] = result_sharp[...,c] + sharp * sharp_strength + high_freq * high_freq_strength
+        
+        # Final blend with focus-aware weighting (expand alpha to match channels)
+        alpha = cp.clip(0.8 * focus_mask, 0.4, 0.9)  # Increased blend strength for sharper result
         result = (1 - alpha) * result + alpha * result_sharp2
         
         # Re-normalize to input brightness distribution
