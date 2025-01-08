@@ -10,11 +10,14 @@ Perfect for:
 
 [!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/sha5b)
 
-## Prerequisites
+## System Requirements & Testing Environment
 
-Before installing the project requirements, you need:
-
+This software has been developed and tested on:
+- Windows 11
+- NVIDIA RTX 3080 Ti with CUDA 12.x
 - Python 3.8 or higher
+
+Requirements:
 - NVIDIA GPU with CUDA support (minimum 4GB VRAM recommended)
 - CUDA Toolkit 11.0 or higher
 - Visual Studio Build Tools (Windows) or GCC (Linux)
@@ -183,4 +186,13 @@ Let's make this tool even better together!
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is licensed under a Non-Commercial Open Source License (NCOSL). This means:
+- ✅ Free for personal and academic use
+- ✅ Open source and can be modified
+- ✅ Must maintain the same license if distributed
+- ❌ Cannot be used for commercial purposes without permission
+- ❌ Cannot be sold or included in commercial products
+
+See the LICENSE file for full details.
+
+For commercial licensing inquiries, please open an issue or contact the project maintainer.
