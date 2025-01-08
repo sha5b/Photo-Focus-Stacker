@@ -8,7 +8,7 @@ Perfect for:
 - Product photography requiring full depth of field
 - Scientific documentation and research
 
-[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/sha5b)
+[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/guidelines/download-assets-2.svg)](https://buymeacoffee.com/sha5b)
 
 ## System Requirements & Testing Environment
 
