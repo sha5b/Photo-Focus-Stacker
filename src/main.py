@@ -36,8 +36,7 @@ class FocusStackingThread(QThread):
         try:
             result = self.stacker.process_stack(
                 self.image_paths, 
-                self.color_space,
-                progress_callback=self.progress.emit
+                self.color_space
             )
             if not self.stopped:
                 self.finished.emit(result)
@@ -58,24 +57,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.image_paths = []
         
-        # Default stacking parameters
-        self.radius = 8    # Balanced radius for detail preservation
-        self.smoothing = 4 # Moderate smoothing for natural transitions
-        self.enhance_sharpness = True  # Enable sharpness enhancement by default
-        
-        # Default sharpening parameters - more conservative values
-        self.snr_values = [100, 80, 60]  # Default to Low for more natural look
-        self.focus_threshold = 0.3  # Default to Medium for selective enhancement
+        # Default stacking parameters optimized for macro photography
+        self.radius = 4    # Smaller radius to detect fine details
+        self.smoothing = 2 # Less smoothing to preserve sharp transitions
         
         # Create stacker with default parameters
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing,
-            enhance_sharpness=self.enhance_sharpness,
-            sharpening_params={
-                'snr_values': self.snr_values,
-                'focus_threshold': self.focus_threshold
-            }
+            smoothing=self.smoothing
         )
         
         self.init_ui()
@@ -106,55 +95,13 @@ class MainWindow(QMainWindow):
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
         
-        # Sharpness enhancement toggle
-        enhance_label = QLabel('Enhance Sharpness:')
-        self.enhance_check = QCheckBox()
-        self.enhance_check.setChecked(self.enhance_sharpness)
-        self.enhance_check.stateChanged.connect(self.update_sharpness_controls)
-        
-        enhance_desc = QLabel("Automatically enhance sharpness in poorly focused regions")
-        enhance_desc.setWordWrap(True)
-        
-        # Sharpening parameters (initially hidden)
-        self.sharpening_group = QGroupBox("Sharpening Parameters")
-        sharpening_layout = QGridLayout()
-        
-        # SNR control
-        snr_label = QLabel('Enhancement Strength:')
-        self.snr_combo = QComboBox()
-        self.snr_combo.addItems(['Low', 'Medium', 'High', 'Very High'])
-        self.snr_combo.setCurrentText('Low')  # Default to Low for more natural look
-        self.snr_combo.currentTextChanged.connect(self.update_stacker)
-        snr_desc = QLabel("Higher values increase sharpening intensity")
-        snr_desc.setWordWrap(True)
-        
-        # Focus threshold control
-        threshold_label = QLabel('Region Coverage:')
-        self.threshold_combo = QComboBox()
-        self.threshold_combo.addItems(['Small', 'Medium', 'Large', 'Maximum'])
-        self.threshold_combo.setCurrentText('Medium')  # Default to Medium
-        self.threshold_combo.currentTextChanged.connect(self.update_stacker)
-        threshold_desc = QLabel("Controls how much of the image gets sharpened")
-        threshold_desc.setWordWrap(True)
-        
-        # Add sharpening controls to layout
-        sharpening_layout.addWidget(snr_label, 0, 0)
-        sharpening_layout.addWidget(self.snr_combo, 0, 1)
-        sharpening_layout.addWidget(snr_desc, 1, 0, 1, 2)
-        sharpening_layout.addWidget(threshold_label, 2, 0)
-        sharpening_layout.addWidget(self.threshold_combo, 2, 1)
-        sharpening_layout.addWidget(threshold_desc, 3, 0, 1, 2)
-        
-        self.sharpening_group.setLayout(sharpening_layout)
-        self.sharpening_group.setVisible(False)
-        
         # Radius control
         radius_label = QLabel('Radius:')
         self.radius_combo = QComboBox()
         self.radius_combo.addItems([str(i) for i in range(1, 21)])
         self.radius_combo.setCurrentText(str(self.radius))
         self.radius_combo.currentTextChanged.connect(self.update_stacker)
-        radius_desc = QLabel("Lower values (2-4) maximize sharpness, higher values for smoother blending")
+        radius_desc = QLabel("Lower values (2-4) maximize detail sharpness, higher values (8+) for smoother transitions")
         radius_desc.setWordWrap(True)
         
         # Smoothing control
@@ -163,20 +110,16 @@ class MainWindow(QMainWindow):
         self.smoothing_combo.addItems([str(i) for i in range(1, 11)])
         self.smoothing_combo.setCurrentText(str(self.smoothing))
         self.smoothing_combo.currentTextChanged.connect(self.update_stacker)
-        smoothing_desc = QLabel("Lower values (1-3) preserve edges, higher values smooth transitions")
+        smoothing_desc = QLabel("Lower values (1-3) preserve sharp details, higher values (4+) blend transitions")
         smoothing_desc.setWordWrap(True)
         
         # Add parameter controls to grid
-        params_layout.addWidget(enhance_label, 0, 0)
-        params_layout.addWidget(self.enhance_check, 0, 1)
-        params_layout.addWidget(enhance_desc, 1, 0, 1, 2)
-        params_layout.addWidget(self.sharpening_group, 2, 0, 1, 2)
-        params_layout.addWidget(radius_label, 3, 0)
-        params_layout.addWidget(self.radius_combo, 3, 1)
-        params_layout.addWidget(radius_desc, 4, 0, 1, 2)
-        params_layout.addWidget(smoothing_label, 5, 0)
-        params_layout.addWidget(self.smoothing_combo, 5, 1)
-        params_layout.addWidget(smoothing_desc, 6, 0, 1, 2)
+        params_layout.addWidget(radius_label, 0, 0)
+        params_layout.addWidget(self.radius_combo, 0, 1)
+        params_layout.addWidget(radius_desc, 1, 0, 1, 2)
+        params_layout.addWidget(smoothing_label, 2, 0)
+        params_layout.addWidget(self.smoothing_combo, 2, 1)
+        params_layout.addWidget(smoothing_desc, 3, 0, 1, 2)
         
         params_group.setLayout(params_layout)
         
@@ -217,43 +160,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
 
-    def update_sharpness_controls(self):
-        """Show/hide sharpening controls based on checkbox"""
-        is_checked = self.enhance_check.isChecked()
-        self.sharpening_group.setVisible(is_checked)
-        self.update_stacker()
-
     def update_stacker(self):
         """Update stacker with current parameter values"""
         self.radius = int(self.radius_combo.currentText())
         self.smoothing = int(self.smoothing_combo.currentText())
-        self.enhance_sharpness = self.enhance_check.isChecked()
-        
-        # Convert UI selections to numerical parameters
-        snr_map = {
-            'Low': [100, 80, 60],      # More conservative values
-            'Medium': [80, 60, 40],     # Balanced enhancement
-            'High': [60, 40, 20],       # Moderate aggressive
-            'Very High': [40, 30, 20]   # Less aggressive than before
-        }
-        threshold_map = {
-            'Small': 0.15,              # More selective
-            'Medium': 0.3,              # Balanced coverage
-            'Large': 0.45,              # Wider coverage
-            'Maximum': 0.6              # Maximum coverage
-        }
-        
-        self.snr_values = snr_map[self.snr_combo.currentText()]
-        self.focus_threshold = threshold_map[self.threshold_combo.currentText()]
         
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing,
-            enhance_sharpness=self.enhance_sharpness,
-            sharpening_params={
-                'snr_values': self.snr_values,
-                'focus_threshold': self.focus_threshold
-            }
+            smoothing=self.smoothing
         )
 
     def detect_stack_size(self, image_paths):
@@ -407,7 +321,7 @@ class MainWindow(QMainWindow):
                 output_path,
                 'JPEG',
                 self.color_combo.currentText()
-            )
+            ) 
             print(f"Successfully saved stack result")
             self.results.append(result)
             status_text = f'Completed stack {self.current_stack + 1} of {len(self.stacks)}'

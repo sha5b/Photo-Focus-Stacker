@@ -1,5 +1,7 @@
 numpy>=1.24.0
 opencv-python>=4.8.0
+opencv-contrib-python>=4.8.0  # For CUDA support
 pillow>=10.0.0
 PyQt5>=5.15.0
 scikit-image>=0.21.0
+cupy-cuda12x>=13.3.0  # GPU array operations with CUDA 12.x
