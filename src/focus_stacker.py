@@ -16,26 +16,22 @@ class FocusStacker:
     @brief Implements focus stacking algorithm to combine multiple images
     """
     
-    def __init__(self, method='A', radius=8, smoothing=4):
+    def __init__(self, radius=8, smoothing=4, enhance_sharpness=True):
         """
         Initialize focus stacker with parameters
-        @param method Focus stacking method ('A')
-            A: Weighted average based on contrast
         @param radius Size of area around each pixel for focus detection (1-20)
         @param smoothing Amount of smoothing for transitions (1-10)
+        @param enhance_sharpness Whether to enhance sharpness in poorly focused regions
         """
-        # Validate parameters
-        if method != 'A':
-            raise ValueError("Method must be 'A'")
         if not 1 <= radius <= 20:
             raise ValueError("Radius must be between 1 and 20")
         if not 1 <= smoothing <= 10:
             raise ValueError("Smoothing must be between 1 and 10")
             
         # Store parameters
-        self.method = method
         self.radius = radius  # Used for focus measure window and guided filter
         self.smoothing = smoothing  # Used for guided filter epsilon
+        self.enhance_sharpness = enhance_sharpness
         
         # Derived parameters
         self.window_size = 2 * radius + 1  # Window size for focus measure
@@ -46,9 +42,9 @@ class FocusStacker:
         self._init_color_profiles()
         
         print(f"\nInitialized focus stacker:")
-        print(f"Method: {method}")
         print(f"Radius: {radius}")
         print(f"Smoothing: {smoothing}")
+        print(f"Enhance sharpness: {enhance_sharpness}")
 
     def _init_color_profiles(self):
         """Initialize color profile transformations"""
@@ -194,38 +190,50 @@ class FocusStacker:
         print("Focus measure calculation complete")
         return focus_map.astype(np.float32)
 
-    def _enhance_sharpness(self, img, psf_size=5, snr=100):
+    def _enhance_sharpness_multiscale(self, img):
         """
-        Enhance sharpness using Wiener deconvolution
+        Enhance sharpness using multi-scale approach with deconvolution and unsharp masking
         @param img Input image
-        @param psf_size Size of point spread function
-        @param snr Signal to noise ratio
         @return Enhanced image
         """
-        # Create point spread function (PSF)
-        center = psf_size // 2
-        psf = np.zeros((psf_size, psf_size))
-        psf[center, center] = 1
-        psf = cv2.GaussianBlur(psf, (psf_size, psf_size), 1.0)
-        psf /= psf.sum()
+        # Parameters for multi-scale enhancement
+        kernel_sizes = [3, 5, 7]  # Multiple scales
+        snr_values = [200, 150, 100]  # Stronger to weaker enhancement
         
-        # Pad image to avoid boundary effects
-        pad = psf_size * 2
-        padded = np.pad(img, ((pad,pad), (pad,pad)), mode='reflect')
+        enhanced = img.copy()
         
-        # Apply Wiener deconvolution
-        psf_fft = np.fft.fft2(psf, s=padded.shape)
-        img_fft = np.fft.fft2(padded)
-        psf_conj = np.conj(psf_fft)
-        power = np.abs(psf_fft) ** 2
-        img_deconv = np.real(np.fft.ifft2(
-            img_fft * psf_conj / (power + 1/snr)
-        ))
+        # Apply deconvolution at multiple scales
+        for size, snr in zip(kernel_sizes, snr_values):
+            # Create point spread function (PSF)
+            center = size // 2
+            psf = np.zeros((size, size))
+            psf[center, center] = 1
+            psf = cv2.GaussianBlur(psf, (size, size), 0.5)  # Smaller sigma for sharper result
+            psf /= psf.sum()
+            
+            # Pad image
+            pad = size * 2
+            padded = np.pad(enhanced, ((pad,pad), (pad,pad)), mode='reflect')
+            
+            # Apply Wiener deconvolution
+            psf_fft = np.fft.fft2(psf, s=padded.shape)
+            img_fft = np.fft.fft2(padded)
+            psf_conj = np.conj(psf_fft)
+            power = np.abs(psf_fft) ** 2
+            img_deconv = np.real(np.fft.ifft2(
+                img_fft * psf_conj / (power + 1/snr)
+            ))
+            
+            # Crop and update result
+            deconv = img_deconv[pad:-pad, pad:-pad]
+            enhanced = np.clip(deconv, 0, 1)
         
-        # Crop back to original size and normalize
-        result = img_deconv[pad:-pad, pad:-pad]
-        result = np.clip(result, 0, 1)
-        return result
+        # Apply unsharp masking as final step
+        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0.5)
+        mask = enhanced - blurred
+        enhanced = enhanced + mask * 0.5  # Adjust strength here
+        
+        return np.clip(enhanced, 0, 1)
 
     def _blend_images(self, aligned_images, focus_maps):
         """
@@ -245,7 +253,7 @@ class FocusStacker:
         
         # Find regions with poor focus
         max_focus = np.max(focus_maps, axis=0)
-        low_focus_mask = max_focus < 0.3  # Threshold for poor focus
+        low_focus_mask = max_focus < 0.2  # Lower threshold to catch more regions
         
         # Normalize focus maps using local contrast
         print("Computing local contrast weights...")
@@ -283,10 +291,10 @@ class FocusStacker:
             # Weight each image
             channel_result = np.sum(aligned_images[:,:,:,channel] * weights, axis=0)
             
-            # Enhance sharpness in low focus regions
-            if np.any(low_focus_mask):
+            # Enhance sharpness in low focus regions if enabled
+            if self.enhance_sharpness and np.any(low_focus_mask):
                 print(f"Enhancing sharpness in low focus regions for channel {channel}")
-                enhanced = self._enhance_sharpness(channel_result)
+                enhanced = self._enhance_sharpness_multiscale(channel_result)
                 channel_result = np.where(low_focus_mask, enhanced, channel_result)
                 
             result[:,:,channel] = channel_result
@@ -508,15 +516,23 @@ class FocusStacker:
         try:
             if format_name in ['TIFF (16-bit)', 'PNG (16-bit)']:
                 print("Converting to 16-bit...")
-                # Scale to full 16-bit range (0-65535)
-                img_16bit = (img * 65535).astype(np.uint16)
+                # Convert each channel separately to prevent color noise
+                img_16bit = np.zeros(img.shape, dtype=np.uint16)
+                for channel in range(3):
+                    # Scale to 16-bit with proper rounding
+                    channel_data = np.clip(img[:,:,channel] * 65535.0 + 0.5, 0, 65535)
+                    img_16bit[:,:,channel] = channel_data.astype(np.uint16)
+                
                 print(f"Image converted to 16-bit with shape {img_16bit.shape}")
                 
                 format_type = 'TIFF' if format_name == 'TIFF (16-bit)' else 'PNG'
                 print(f"Saving as {format_type}...")
                 
-                # Create PIL image with correct mode
+                # Create PIL image with correct mode and color profile
                 pil_img = PIL.Image.fromarray(img_16bit, mode='RGB')
+                if color_space == 'sRGB':
+                    icc = self.color_profiles['sRGB'].tobytes()
+                    pil_img.info['icc_profile'] = icc
                 
                 # Save with appropriate format-specific parameters
                 if format_type == 'TIFF':

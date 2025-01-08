@@ -6,7 +6,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                             QComboBox, QProgressBar, QMessageBox, QGroupBox,
-                            QGridLayout)
+                            QGridLayout, QCheckBox)
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from focus_stacker import FocusStacker
 
@@ -51,16 +51,16 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.image_paths = []
         
-        # Default stacking parameters optimized for maximum sharpness
-        self.method = 'A'  # Weighted average method for best results
+        # Default stacking parameters
         self.radius = 3    # Very small radius for maximum sharpness
         self.smoothing = 1 # Minimal smoothing to preserve edges
+        self.enhance_sharpness = True  # Enable sharpness enhancement by default
         
         # Create stacker with default parameters
         self.stacker = FocusStacker(
-            method=self.method,
             radius=self.radius,
-            smoothing=self.smoothing
+            smoothing=self.smoothing,
+            enhance_sharpness=self.enhance_sharpness
         )
         
         self.init_ui()
@@ -91,17 +91,14 @@ class MainWindow(QMainWindow):
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
         
-        # Method selection
-        method_label = QLabel('Method:')
-        self.method_combo = QComboBox()
-        self.method_combo.addItems(['A'])  # Only use weighted average method
-        self.method_combo.setCurrentText(self.method)
-        self.method_combo.currentTextChanged.connect(self.update_stacker)
+        # Sharpness enhancement toggle
+        enhance_label = QLabel('Enhance Sharpness:')
+        self.enhance_check = QCheckBox()
+        self.enhance_check.setChecked(self.enhance_sharpness)
+        self.enhance_check.stateChanged.connect(self.update_stacker)
         
-        # Method description
-        self.method_desc = QLabel()
-        self.update_method_description(self.method)
-        self.method_desc.setWordWrap(True)
+        enhance_desc = QLabel("Automatically enhance sharpness in poorly focused regions")
+        enhance_desc.setWordWrap(True)
         
         # Radius control
         radius_label = QLabel('Radius:')
@@ -122,9 +119,9 @@ class MainWindow(QMainWindow):
         smoothing_desc.setWordWrap(True)
         
         # Add parameter controls to grid
-        params_layout.addWidget(method_label, 0, 0)
-        params_layout.addWidget(self.method_combo, 0, 1)
-        params_layout.addWidget(self.method_desc, 1, 0, 1, 2)
+        params_layout.addWidget(enhance_label, 0, 0)
+        params_layout.addWidget(self.enhance_check, 0, 1)
+        params_layout.addWidget(enhance_desc, 1, 0, 1, 2)
         params_layout.addWidget(radius_label, 2, 0)
         params_layout.addWidget(self.radius_combo, 2, 1)
         params_layout.addWidget(radius_desc, 3, 0, 1, 2)
@@ -391,22 +388,16 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, 'Error', f'Failed to save image: {str(e)}')
 
-    def update_method_description(self, method):
-        """Update the method description label based on selected method"""
-        self.method_desc.setText("Weighted average based on contrast. Optimized for preserving sharp details.")
-        
     def update_stacker(self):
         """Update stacker with current parameter values"""
-        self.method = self.method_combo.currentText()
         self.radius = int(self.radius_combo.currentText())
         self.smoothing = int(self.smoothing_combo.currentText())
-        
-        self.update_method_description(self.method)
+        self.enhance_sharpness = self.enhance_check.isChecked()
         
         self.stacker = FocusStacker(
-            method=self.method,
             radius=self.radius,
-            smoothing=self.smoothing
+            smoothing=self.smoothing,
+            enhance_sharpness=self.enhance_sharpness
         )
 
 if __name__ == '__main__':
