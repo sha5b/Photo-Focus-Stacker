@@ -185,175 +185,82 @@ class FocusStacker:
         return aligned
 
     def _focus_measure(self, img):
+        """
+        Optimized focus measure calculation using parallel GPU operations
+        """
         if len(img.shape) == 3:
             img = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
         else:
             img = (img * 255).astype(np.uint8)
             
-        # Convert to GPU array
+        # Convert to GPU array once
         gpu_img = cp.asarray(img.astype(np.float32))
         
-        # Multi-scale wavelet decomposition for focus detection
-        levels = 4
-        focus_maps = []
+        # Pre-calculate common image derivatives for all scales
+        dx = cp.asarray(cv2.Sobel(cp.asnumpy(gpu_img), cv2.CV_32F, 1, 0, ksize=3))
+        dy = cp.asarray(cv2.Sobel(cp.asnumpy(gpu_img), cv2.CV_32F, 0, 1, ksize=3))
+        gradient_magnitude = cp.sqrt(dx*dx + dy*dy)
         
-        for scale in range(levels):
-            # Apply wavelet decomposition
-            if scale > 0:
-                gpu_scaled = cp.asarray(cv2.resize(cp.asnumpy(gpu_img), None, fx=1.0/(2**scale), fy=1.0/(2**scale)))
+        # Pre-calculate Laplacian for edge detection
+        laplacian = cp.asarray(cv2.Laplacian(cp.asnumpy(gpu_img), cv2.CV_32F))
+        
+        # Parallel multi-scale analysis
+        scales = [1.0, 0.5, 0.25]
+        weights = [0.6, 0.3, 0.1]
+        
+        focus_map = cp.zeros_like(gpu_img)
+        
+        for scale, weight in zip(scales, weights):
+            if scale != 1.0:
+                scaled = cp.asarray(cv2.resize(cp.asnumpy(gpu_img), None, fx=scale, fy=scale))
+                scaled_grad = cp.asarray(cv2.resize(cp.asnumpy(gradient_magnitude), None, fx=scale, fy=scale))
+                scaled_lap = cp.asarray(cv2.resize(cp.asnumpy(laplacian), None, fx=scale, fy=scale))
             else:
-                gpu_scaled = gpu_img
-                
-            # Pyramid decomposition for better detail analysis
-            pyramid_levels = 3
-            pyramids = []
-            current = gpu_scaled.copy()
+                scaled = gpu_img
+                scaled_grad = gradient_magnitude
+                scaled_lap = laplacian
             
-            for _ in range(pyramid_levels):
-                # Gaussian blur for next level
-                blurred = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current), (5,5), 0))
-                # High-frequency residual
-                residual = current - blurred
-                pyramids.append(residual)
-                current = cp.asarray(cv2.resize(cp.asnumpy(blurred), (blurred.shape[1]//2, blurred.shape[0]//2)))
+            # Parallel frequency analysis
+            high_freq = cp.abs(scaled - cp.asarray(cv2.GaussianBlur(cp.asnumpy(scaled), (5,5), 0)))
             
-            # Enhanced frequency analysis
-            high_freq = cp.zeros_like(gpu_scaled)
-            for i, residual in enumerate(pyramids):
-                if i > 0:
-                    residual = cp.asarray(cv2.resize(cp.asnumpy(residual), (gpu_scaled.shape[1], gpu_scaled.shape[0])))
-                weight = 1.0 / (2 ** i)  # Higher weight for finer details
-                high_freq += weight * cp.abs(residual)
+            # Parallel edge detection
+            edge_strength = cp.abs(scaled_lap)
             
-            # Enhanced 3D-aware edge detection optimized for photogrammetry
-            edges = cp.zeros_like(gpu_scaled)
+            # Local contrast in parallel
+            local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(scaled), (7,7), 1.5))
+            local_contrast = cp.abs(scaled - local_mean)
             
-            # Enhanced multi-directional gradient analysis for maximum detail detection
-            gradients = []
-            angles = [0, 30, 60, 90, 120, 150]  # More angles for finer detail detection
+            # Combine measures
+            scale_measure = high_freq * edge_strength * local_contrast * scaled_grad
             
-            for angle in angles:
-                # Rotate image to analyze gradients at different angles
-                if angle > 0:
-                    rotated = cp.asarray(cv2.warpAffine(cp.asnumpy(gpu_scaled),
-                                                       cv2.getRotationMatrix2D((gpu_scaled.shape[1]/2, 
-                                                                              gpu_scaled.shape[0]/2),
-                                                                              angle, 1.0),
-                                                       gpu_scaled.shape))
-                else:
-                    rotated = gpu_scaled
-                
-                # Enhanced multi-scale gradient analysis with finer steps
-                for sigma in [0.3, 0.5, 0.7, 0.9]:  # Finer sigma steps for more precise detail detection
-                    # Enhanced gradient calculation with depth awareness
-                    dx = cp.asarray(cv2.Sobel(cp.asnumpy(rotated), cv2.CV_32F, 1, 0, ksize=3))
-                    dy = cp.asarray(cv2.Sobel(cp.asnumpy(rotated), cv2.CV_32F, 0, 1, ksize=3))
-                    
-                    # Compute gradient magnitude with depth weighting
-                    gradient = cp.sqrt(dx*dx + dy*dy)
-                    
-                    # Enhanced depth-aware smoothing with stronger edge preservation
-                    gradient = cp.asarray(cv2.bilateralFilter(cp.asnumpy(gradient), 5, 75, 75))
-                    # Additional bilateral pass for better detail preservation
-                    gradient = cp.asarray(cv2.bilateralFilter(cp.asnumpy(gradient), 3, 25, 25))
-                    
-                    # Rotate gradient back if needed
-                    if angle > 0:
-                        gradient = cp.asarray(cv2.warpAffine(cp.asnumpy(gradient),
-                                                           cv2.getRotationMatrix2D((gradient.shape[1]/2,
-                                                                                  gradient.shape[0]/2),
-                                                                                  -angle, 1.0),
-                                                           gradient.shape))
-                    
-                    # Weight by scale importance
-                    weight = 1.0 / (sigma * sigma)
-                    gradients.append(gradient * weight)
+            # Resize back to original size if needed
+            if scale != 1.0:
+                scale_measure = cp.asarray(cv2.resize(cp.asnumpy(scale_measure), (gpu_img.shape[1], gpu_img.shape[0])))
             
-            # Combine gradients with depth continuity awareness
-            for gradient in gradients:
-                edges += gradient
-                
-            # Apply bilateral filtering to preserve depth discontinuities
-            edges = cp.asarray(cv2.bilateralFilter(cp.asnumpy(edges), 7, 100, 100))
+            focus_map += weight * scale_measure
             
-            # Enhanced multi-scale local contrast analysis
-            local_std = cp.zeros_like(gpu_scaled)
-            window_sizes = [3, 5, 7, 9, 11]  # Additional window size for finer granularity
-            weights = [0.35, 0.3, 0.2, 0.1, 0.05]  # Adjusted weights for better detail balance
-            
-            for size, weight in zip(window_sizes, weights):
-                pad_size = size // 2
-                padded = cp.pad(gpu_scaled, pad_size, mode='reflect')
-                
-                # Compute local statistics using sliding window
-                local_var = cp.zeros_like(gpu_scaled)
-                for i in range(size):
-                    for j in range(size):
-                        window = padded[i:i+gpu_scaled.shape[0], j:j+gpu_scaled.shape[1]]
-                        diff = window - gpu_scaled
-                        local_var += diff * diff
-                
-                local_std += cp.sqrt(local_var / (size * size)) * weight
-            
-            # Combine all focus measures with emphasis on high frequencies
-            focus_map = high_freq * edges * cp.sqrt(local_std)
-            
-            # Always ensure focus map matches input dimensions
-            if focus_map.shape[:2] != (img.shape[0], img.shape[1]):
-                focus_map = cp.asarray(cv2.resize(cp.asnumpy(focus_map), (img.shape[1], img.shape[0])))
-            
-            focus_maps.append(focus_map)
-            
-            # Enhanced detail-preserving scale weighting
-            weights = [0.6, 0.25, 0.1, 0.05]  # Stronger emphasis on finest details
-            final_focus = cp.zeros_like(focus_maps[0])
-            
-            # Enhanced multi-scale combination with subject-aware weighting
-            for i, (fm, w) in enumerate(zip(focus_maps, weights)):
-                # Calculate local variance to identify high-detail regions (likely the main subject)
-                local_var = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm * fm), (15, 15), 0)) - \
-                          cp.power(cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm), (15, 15), 0)), 2)
-                
-                # Create detail-aware mask
-                detail_mask = cp.clip((local_var - cp.min(local_var)) / (cp.max(local_var) - cp.min(local_var) + 1e-6), 0.3, 1.0)
-                
-                # Enhanced detail preservation with stronger local contrast
-                enhanced = cp.power(fm, 0.6 + 0.4 * detail_mask)  # More aggressive enhancement for details
-                
-                # Multi-scale local contrast enhancement
-                for radius in [1, 3, 5]:
-                    local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(enhanced), (radius*2+1, radius*2+1), radius/2))
-                    local_detail = enhanced - local_mean
-                    enhanced = enhanced + local_detail * (0.4 + 0.4 * detail_mask) * (1.0 - radius/6)
-                
-                # Edge-aware detail boost
-                edge_strength = cp.asarray(cv2.Laplacian(cp.asnumpy(enhanced), cv2.CV_32F))
-                edge_mask = cp.clip(cp.abs(edge_strength) / (cp.max(cp.abs(edge_strength)) + 1e-6), 0, 1)
-                
-                # Combine with detail-weighted contribution
-                final_focus += enhanced * w * (0.8 + 0.4 * detail_mask) * (1.0 + 0.5 * edge_mask)
-            
-            # Enhanced contrast normalization with edge preservation
-            focus_map = (final_focus - cp.min(final_focus)) / (cp.max(final_focus) - cp.min(final_focus))
-            
-            # Multi-scale detail mask for adaptive enhancement
-            detail_masks = []
-            for radius in [15, 25, 35]:
-                mask = cp.asarray(cv2.GaussianBlur(cp.asnumpy(focus_map * focus_map), (radius, radius), radius/3))
-                mask = (mask - cp.min(mask)) / (cp.max(mask) - cp.min(mask) + 1e-6)
-                detail_masks.append(mask)
-            
-            # Combine detail masks with different weights
-            detail_mask = detail_masks[0] * 0.5 + detail_masks[1] * 0.3 + detail_masks[2] * 0.2
-            
-            # Enhanced adaptive normalization
-            focus_map = cp.power(focus_map, 0.4 + 0.4 * detail_mask)  # More aggressive enhancement
-            # Additional local contrast boost
-            local_mean = cp.asarray(cv2.GaussianBlur(cp.asnumpy(focus_map), (7, 7), 1.5))
-            local_detail = focus_map - local_mean
-            focus_map = focus_map + local_detail * 0.3 * (1.0 + detail_mask)
+            # Clear intermediate results
+            del high_freq, edge_strength, local_mean, local_contrast, scale_measure
+            if scale != 1.0:
+                del scaled, scaled_grad, scaled_lap
         
-        return cp.asnumpy(focus_map).astype(np.float32)
+        # Final enhancement
+        focus_map = (focus_map - cp.min(focus_map)) / (cp.max(focus_map) - cp.min(focus_map) + 1e-6)
+        
+        # Edge-aware enhancement
+        edge_mask = cp.clip(cp.abs(laplacian) / (cp.max(cp.abs(laplacian)) + 1e-6), 0, 1)
+        focus_map = focus_map * (1.0 + 0.2 * edge_mask)
+        
+        # Normalize and cleanup
+        focus_map = cp.clip((focus_map - cp.min(focus_map)) / (cp.max(focus_map) - cp.min(focus_map) + 1e-6), 0, 1)
+        
+        result = cp.asnumpy(focus_map).astype(np.float32)
+        
+        # Clear GPU memory
+        del gpu_img, dx, dy, gradient_magnitude, laplacian, focus_map, edge_mask
+        cp.get_default_memory_pool().free_all_blocks()
+        
+        return result
 
     def _blend_images(self, aligned_images, focus_maps):
         # Get dimensions for processing
