@@ -264,9 +264,10 @@ class FocusStacker:
             # Combine all focus measures with emphasis on high frequencies
             focus_map = high_freq * edges * cp.sqrt(local_std)
             
-            if scale > 0:
+            # Always ensure focus map matches input dimensions
+            if focus_map.shape[:2] != (img.shape[0], img.shape[1]):
                 focus_map = cp.asarray(cv2.resize(cp.asnumpy(focus_map), (img.shape[1], img.shape[0])))
-                
+            
             focus_maps.append(focus_map)
             
         # Weight maps by scale importance with stronger emphasis on finest details
@@ -291,284 +292,174 @@ class FocusStacker:
         return cp.asnumpy(focus_map).astype(np.float32)
 
     def _blend_images(self, aligned_images, focus_maps):
-        # Process at configured scale
-        gpu_aligned = []
-        gpu_focus = []
+        # Get dimensions for processing
+        h, w = aligned_images[0].shape[:2]
+        if self.scale_factor > 1:
+            new_h, new_w = h * self.scale_factor, w * self.scale_factor
+        else:
+            new_h, new_w = h, w
+            
+        # Initialize result array on GPU
+        result = cp.zeros((new_h, new_w, 3), dtype=cp.float32)
+        weights_sum = cp.zeros((new_h, new_w, 1), dtype=cp.float32)
         
-        for img, fm in zip(aligned_images, focus_maps):
-            if self.scale_factor > 1:
-                # Upscale image with optimized parameters
-                h, w = img.shape[:2]
-                new_h, new_w = h * self.scale_factor, w * self.scale_factor
-                
-                # Use Lanczos4 for RGB image
-                img_up = cv2.resize(img, (new_w, new_h), 
-                                  interpolation=cv2.INTER_LANCZOS4)
-                
-                # Use linear interpolation for focus maps (smoother transitions)
-                fm_up = cv2.resize(fm, (new_w, new_h), 
-                                 interpolation=cv2.INTER_LINEAR)
-            else:
-                img_up = img
-                fm_up = fm
+        # Debug dimensions
+        print("\nDimension check before blending:")
+        print(f"Target dimensions (h, w): ({h}, {w})")
+        print(f"Processing dimensions (new_h, new_w): ({new_h}, {new_w})")
+        for i, (img, fm) in enumerate(zip(aligned_images, focus_maps)):
+            print(f"Image {i+1} shape: {img.shape}")
+            print(f"Focus map {i+1} shape: {fm.shape}")
+            
+        # Ensure all focus maps match image dimensions before processing
+        resized_focus_maps = []
+        for i, fm in enumerate(focus_maps):
+            if fm.shape[:2] != (h, w):
+                print(f"Resizing focus map {i+1} from {fm.shape[:2]} to {(h, w)}")
+                fm = cv2.resize(fm, (w, h), interpolation=cv2.INTER_LINEAR)
+                print(f"After resize - focus map {i+1} shape: {fm.shape}")
+            resized_focus_maps.append(fm)
+            
+        # Process images one at a time to reduce memory usage
+        for img, fm in zip(aligned_images, resized_focus_maps):
+            # Clear GPU cache
+            cp.get_default_memory_pool().free_all_blocks()
+            
+            # Scale both image and focus map to processing dimensions
+            img_up = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            fm_up = cv2.resize(fm, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
             
             # Ensure proper shape for focus maps
             if len(fm_up.shape) == 2:
                 fm_up = fm_up.reshape(fm_up.shape[0], fm_up.shape[1], 1)
+        
+            # Process focus map
+            gpu_fm = cp.asarray(fm_up)
+            
+            # Apply feathered blending mask
+            overlap_size = 100
+            if len(gpu_fm.shape) > 2:
+                fm_2d = gpu_fm[..., 0]
+            else:
+                fm_2d = gpu_fm
                 
-            gpu_aligned.append(cp.asarray(img_up))
-            gpu_focus.append(cp.asarray(fm_up))
+            fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm_2d),
+                                                 (overlap_size*2+1, overlap_size*2+1),
+                                                 overlap_size/3))
+            boundary = cp.abs(fm_2d - fm_blur) > 0.05
+            fm_new = cp.where(boundary, fm_blur, fm_2d)
             
-        gpu_aligned = cp.array(gpu_aligned)
-        gpu_focus = cp.array(gpu_focus)  # Shape will be (N, H, W, 1)
-        
-        # Create feathered blending masks with larger overlap
-        overlap_size = 100  # increased overlap for smoother transitions
-        for i in range(len(gpu_focus)):
-            # Gaussian blur the focus map edges (handle channel dimension)
-            fm = gpu_focus[i]
-            if len(fm.shape) > 2:
-                fm_2d = fm[..., 0]  # Take first channel
-                fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm_2d), 
-                                                     (overlap_size*2+1, overlap_size*2+1), 
-                                                     overlap_size/3))
-                # Create smoother transition at boundaries with lower threshold
-                boundary = cp.abs(fm_2d - fm_blur) > 0.05
-                fm_new = cp.where(boundary, fm_blur, fm_2d)
-                gpu_focus[i] = fm_new.reshape(fm_new.shape[0], fm_new.shape[1], 1)  # Restore channel
-            else:
-                fm_blur = cp.asarray(cv2.GaussianBlur(cp.asnumpy(fm), 
-                                                     (overlap_size*2+1, overlap_size*2+1), 
-                                                     overlap_size/3))
-                boundary = cp.abs(fm - fm_blur) > 0.05
-                gpu_focus[i] = cp.where(boundary, fm_blur, fm)
+            # Edge-aware smoothing
+            smoothed = cp.asarray(gaussian(cp.asnumpy(fm_new), sigma=2.0))
             
-        # Edge-aware smoothing with adaptive radius
-        sigma = 2.0  # Increased for smoother transitions
-        for i in range(len(gpu_focus)):
-            # Handle focus maps with channel dimension
-            if len(gpu_focus[i].shape) > 2:
-                smoothed = cp.asarray(gaussian(cp.asnumpy(gpu_focus[i][..., 0]), sigma=sigma))
-                gpu_focus[i] = smoothed.reshape(smoothed.shape[0], smoothed.shape[1], 1)
+            # Normalize focus map
+            fm_min = cp.min(smoothed)
+            fm_max = cp.max(smoothed)
+            if fm_max > fm_min:
+                weight = (smoothed - fm_min) / (fm_max - fm_min)
             else:
-                gpu_focus[i] = cp.asarray(gaussian(cp.asnumpy(gpu_focus[i]), sigma=sigma))
+                weight = cp.ones_like(smoothed) / len(aligned_images)
+                
+            # Reshape weight for RGB blending
+            weight = weight.reshape(weight.shape[0], weight.shape[1], 1)
+            
+            # Add to result
+            gpu_img = cp.asarray(img_up)
+            result += gpu_img * weight
+            weights_sum += weight
+            
+            # Clear individual arrays
+            del gpu_fm, fm_blur, fm_new, smoothed, weight, gpu_img
+            cp.get_default_memory_pool().free_all_blocks()
+            
+        # Normalize result
+        result = result / (weights_sum + 1e-10)
         
-        # Normalize focus maps individually first
-        for i in range(len(focus_maps)):
-            fm = gpu_focus[i]
-            if len(fm.shape) > 2:
-                fm_2d = fm[..., 0]  # Take first channel
-                fm_min = cp.min(fm_2d)
-                fm_max = cp.max(fm_2d)
-                if fm_max > fm_min:
-                    fm_norm = (fm_2d - fm_min) / (fm_max - fm_min)
-                    gpu_focus[i] = fm_norm.reshape(fm_norm.shape[0], fm_norm.shape[1], 1)
-            else:
-                fm_min = cp.min(fm)
-                fm_max = cp.max(fm)
-                if fm_max > fm_min:
-                    gpu_focus[i] = (fm - fm_min) / (fm_max - fm_min)
-        
-        # Compute weights with better normalization (handle channel dimension)
-        gpu_focus_2d = cp.array([fm[..., 0] if len(fm.shape) > 2 else fm for fm in gpu_focus])
-        weights_sum = cp.sum(gpu_focus_2d, axis=0, keepdims=True)
-        weights = cp.where(weights_sum > 0, 
-                         gpu_focus_2d / (weights_sum + 1e-10),
-                         1.0 / len(focus_maps))
-        
-        # Ensure weights sum to 1 exactly
-        weights_sum = cp.sum(weights, axis=0, keepdims=True)
-        weights = weights / (weights_sum + 1e-10)
-        
-        # Add channel dimension for RGB blending
-        weights = weights.reshape(weights.shape[0], weights.shape[1], weights.shape[2], 1)
-        
-        # Add channel dimension for RGB blending (weights already have shape (N, H, W, 1))
-        result = cp.sum(gpu_aligned * weights, axis=0)
-        
-        # Calculate and preserve brightness distribution
-        input_mean = float(cp.mean(gpu_aligned))
-        input_std = float(cp.std(gpu_aligned))
-        result_mean = float(cp.mean(result))
-        result_std = float(cp.std(result))
-        
-        print(f"Input stats - mean: {input_mean:.3f}, std: {input_std:.3f}")
-        print(f"Result stats - mean: {result_mean:.3f}, std: {result_std:.3f}")
+        # Calculate input statistics from first image for reference
+        ref_img = cp.asarray(aligned_images[0])
+        input_mean = float(cp.mean(ref_img))
+        input_std = float(cp.std(ref_img))
+        del ref_img
         
         # Normalize result to match input distribution
+        result_mean = float(cp.mean(result))
+        result_std = float(cp.std(result))
         result = (result - result_mean) * (input_std / result_std) + input_mean
         
-        # Verify final stats
-        final_mean = float(cp.mean(result))
-        final_std = float(cp.std(result))
-        print(f"Final stats - mean: {final_mean:.3f}, std: {final_std:.3f}")
+        # Debug sharpening mask dimensions
+        print(f"\nSharpening mask calculation:")
+        print(f"Result shape: {result.shape}")
+        print(f"Focus mask initial shape: {result[...,0].shape}")
         
-        # Compute focus-aware sharpening mask
-        focus_mask = cp.zeros_like(result[...,0])  # Single channel
-        for fm in gpu_focus:
-            # Ensure focus map is 2D
-            if len(fm.shape) > 2:
-                fm = fm[..., 0]  # Take first channel if multi-dimensional
-            focus_mask += (1.0 - fm)
-        focus_mask /= len(gpu_focus)
-        focus_mask = cp.clip(focus_mask, 0.3, 1.0)  # Ensure minimum sharpening
+        # Compute focus-aware sharpening mask using resized focus maps
+        focus_mask = cp.zeros_like(result[...,0])
+        for i, fm in enumerate(resized_focus_maps):
+            print(f"Processing focus map {i+1}:")
+            print(f"Original shape: {fm.shape}")
+            # Resize focus map to match processing dimensions
+            fm_up = cv2.resize(fm, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            print(f"Upscaled shape: {fm_up.shape}")
+            gpu_fm = cp.asarray(fm_up)
+            if len(gpu_fm.shape) > 2:
+                gpu_fm = gpu_fm[..., 0]
+            print(f"GPU array shape: {gpu_fm.shape}")
+            focus_mask += (1.0 - gpu_fm)
+            del gpu_fm, fm_up
+            
+        print(f"Final focus mask shape: {focus_mask.shape}")
+        focus_mask /= len(focus_maps)
+        focus_mask = cp.clip(focus_mask, 0.3, 1.0)
         
-        # Multi-scale adaptive sharpening
-        result_sharp = cp.zeros_like(result)
+        # Process sharpening in chunks to save memory
+        chunk_size = 512  # Process in 512-pixel vertical strips
+        width = result.shape[1]
+        num_chunks = (width + chunk_size - 1) // chunk_size
         
-        # First pass: Detail recovery in out-of-focus areas
-        for c in range(3):
-            # Pyramid decomposition
-            current = result[...,c]
-            detail_levels = []
+        for chunk_idx in range(num_chunks):
+            start_x = chunk_idx * chunk_size
+            end_x = min(start_x + chunk_size, width)
             
-            for _ in range(3):
-                blurred = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current), (5,5), 0))
-                detail = current - blurred
-                detail_levels.append(detail)
-                current = cp.asarray(cv2.resize(cp.asnumpy(blurred), (blurred.shape[1]//2, blurred.shape[0]//2)))
+            # Extract chunk
+            chunk = result[:, start_x:end_x]
+            chunk_mask = focus_mask[:, start_x:end_x]
             
-            # Enhanced detail reconstruction
-            enhanced = result[...,c].copy()
-            for i, detail in enumerate(detail_levels):
-                if i > 0:
-                    detail = cp.asarray(cv2.resize(cp.asnumpy(detail), (result.shape[1], result.shape[0])))
-                enhancement = detail * (0.6 * (i + 1))  # Increased enhancement strength
-                enhanced += enhancement * focus_mask  # Focus mask is already 2D
-            
-            result_sharp[...,c] = enhanced
-        
-        # Second pass: Adaptive sharpening
-        result_sharp2 = cp.zeros_like(result)
-        for c in range(3):
-            # Apply stronger sharpening in out-of-focus areas
-            sharp = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(sharp_kernel, s=result_sharp[...,c].shape)
-            ))
-            # Multi-pass sharpening with increasing strength in out-of-focus areas
-            sharp_strength = cp.clip(focus_mask * 1.2, 0.7, 0.95)  # Increased base strength
-            
-            # First high-frequency enhancement pass
-            high_freq1 = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(highfreq_kernel, s=result_sharp[...,c].shape)
-            ))
-            
-            # Multi-kernel enhancement for maximum detail preservation
-            edge_enhanced = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(edge_kernel, s=result_sharp[...,c].shape)
-            ))
-            
-            # Stronger high-frequency enhancement
-            high_freq2 = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result_sharp[...,c]) * cp.fft.fft2(highfreq_kernel, s=result_sharp[...,c].shape)
-            ))
-            
-            # Deconvolution for detail recovery
-            psf = cp.array([[0.05, 0.1, 0.05],
-                          [0.1, 0.4, 0.1],
-                          [0.05, 0.1, 0.05]], dtype=cp.float32)
-            deconv = cp.real(cp.fft.ifft2(
-                cp.fft.fft2(result_sharp[...,c]) / (cp.fft.fft2(psf, s=result_sharp[...,c].shape) + 1e-4)
-            ))
-            
-            # Combine all enhancements with maximum detail preservation
-            high_freq_strength = cp.clip(focus_mask * 1.1, 0.6, 0.9)  # More aggressive strength
-            edge_strength = cp.clip(focus_mask * 0.9, 0.5, 0.8)  # Stronger edge enhancement
-            deconv_strength = cp.clip(focus_mask * 0.6, 0.3, 0.7)  # More aggressive deconvolution
-            
-            result_sharp2[...,c] = (result_sharp[...,c] + 
-                                  sharp * sharp_strength +
-                                  high_freq1 * high_freq_strength +
-                                  high_freq2 * (high_freq_strength * 0.7) +  # Increased contribution
-                                  edge_enhanced * edge_strength +  # Add edge enhancement
-                                  deconv * deconv_strength)
-        
-        # Multi-scale feathered blending
-        def create_feather_weights(size):
-            y, x = cp.ogrid[:size[0], :size[1]]
-            weights = cp.minimum(x, size[1]-x) * cp.minimum(y, size[0]-y)
-            return weights / weights.max()
-
-        # Create feather weights for smooth transitions
-        feather = create_feather_weights(result.shape[:2])
-        feather = feather.reshape(feather.shape[0], feather.shape[1])  # Ensure 2D shape
-        
-        # Apply feathered blending across scales
-        levels = 4  # Additional pyramid level for finer detail control
-        pyramid_result = []
-        pyramid_sharp = []
-        
-        # Build Laplacian pyramids
-        current_result = result
-        current_sharp = result_sharp2
-        
-        for _ in range(levels):
-            # Gaussian blur
-            blurred_result = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current_result), (5,5), 0))
-            blurred_sharp = cp.asarray(cv2.GaussianBlur(cp.asnumpy(current_sharp), (5,5), 0))
-            
-            # Compute and store residual
-            pyramid_result.append(current_result - blurred_result)
-            pyramid_sharp.append(current_sharp - blurred_sharp)
-            
-            # Downsample for next level
-            current_result = cp.asarray(cv2.resize(cp.asnumpy(blurred_result), 
-                                                 (blurred_result.shape[1]//2, blurred_result.shape[0]//2)))
-            current_sharp = cp.asarray(cv2.resize(cp.asnumpy(blurred_sharp), 
-                                                (blurred_sharp.shape[1]//2, blurred_sharp.shape[0]//2)))
-        
-        # Add base levels
-        pyramid_result.append(current_result)
-        pyramid_sharp.append(current_sharp)
-        
-        # Blend pyramids with feathering
-        blended_pyramid = []
-        for i, (pr, ps) in enumerate(zip(pyramid_result, pyramid_sharp)):
-            # Resize feather weights if needed
-            if pr.shape[:2] != feather.shape:
-                level_feather = cp.asarray(cv2.resize(cp.asnumpy(feather), (pr.shape[1], pr.shape[0])))
-            else:
-                level_feather = feather
+            # Apply sharpening to chunk
+            sharp_chunk = cp.zeros_like(chunk)
+            for c in range(3):
+                # Basic sharpening
+                sharp = cp.real(cp.fft.ifft2(
+                    cp.fft.fft2(chunk[...,c]) * cp.fft.fft2(sharp_kernel, s=chunk[...,c].shape)
+                ))
                 
-            # Adaptive blending based on detail level
-            weight = level_feather * (1.0 - 0.1 * i)  # Reduce feathering influence at finer levels
-            weight = weight.reshape(weight.shape[0], weight.shape[1], 1)  # Add channel dim properly
-            blend = pr * (1 - weight) + ps * weight
-            blended_pyramid.append(blend)
+                # High-frequency enhancement
+                high_freq = cp.real(cp.fft.ifft2(
+                    cp.fft.fft2(chunk[...,c]) * cp.fft.fft2(highfreq_kernel, s=chunk[...,c].shape)
+                ))
+                
+                # Combine enhancements
+                sharp_strength = cp.clip(chunk_mask * 1.2, 0.7, 0.95)
+                sharp_chunk[...,c] = chunk[...,c] + sharp * sharp_strength + high_freq * 0.3
             
-        # Reconstruct image from pyramid
-        result = blended_pyramid[-1]
-        for level in reversed(blended_pyramid[:-1]):
-            result = cp.asarray(cv2.resize(cp.asnumpy(result), (level.shape[1], level.shape[0])))
-            result += level
+            # Update result chunk
+            result[:, start_x:end_x] = sharp_chunk
             
-        # Final adaptive blend with stronger emphasis on enhanced details
-        blend_mask = cp.clip(0.95 * focus_mask.reshape(focus_mask.shape[0], focus_mask.shape[1]) * feather, 0.7, 0.98)  # More aggressive blend
-        blend_mask = blend_mask.reshape(blend_mask.shape[0], blend_mask.shape[1], 1)  # Add channel dim properly
-        result = (1 - blend_mask) * result + blend_mask * result_sharp2
+            # Clear chunk data
+            del chunk, chunk_mask, sharp_chunk
+            cp.get_default_memory_pool().free_all_blocks()
         
-        # Downscale if we processed at higher resolution
+        # Convert back to CPU and downscale if needed
         if self.scale_factor > 1:
-            h, w = aligned_images[0].shape[:2]
-            result_np = cp.asnumpy(result)
-            
-            # Use Lanczos4 for downscaling to preserve sharpness
-            result_np = cv2.resize(result_np, (w, h), 
+            result_np = cv2.resize(cp.asnumpy(result), (w, h), 
                                  interpolation=cv2.INTER_LANCZOS4)
         else:
             result_np = cp.asnumpy(result)
-        
-        # Re-normalize to input brightness distribution
-        result_mean = float(np.mean(result_np))
-        result_std = float(np.std(result_np))
-        result_np = (result_np - result_mean) * (input_std / result_std) + input_mean
-        
-        # Clip while preserving relative brightness
+            
+        # Final normalization and clipping
         result_np = np.clip(result_np, 0, 1)
         
-        # Final brightness check
-        final_mean = float(np.mean(result_np))
-        print(f"Final output mean: {final_mean:.3f}")
+        # Clear GPU memory
+        del result, focus_mask
+        cp.get_default_memory_pool().free_all_blocks()
         
         return result_np
 
