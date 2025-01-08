@@ -29,18 +29,24 @@ class FocusStackingThread(QThread):
         self.stacker = stacker
         self.image_paths = image_paths
         self.color_space = color_space
+        self.stopped = False
 
     def run(self):
         """Process the focus stacking operation"""
         try:
             result = self.stacker.process_stack(
                 self.image_paths, 
-                self.color_space,
-                progress_callback=self.progress.emit
+                self.color_space
             )
-            self.finished.emit(result)
+            if not self.stopped:
+                self.finished.emit(result)
         except Exception as e:
-            self.error.emit(str(e))
+            if not self.stopped:
+                self.error.emit(str(e))
+
+    def stop(self):
+        """Signal the thread to stop processing"""
+        self.stopped = True
 
 class MainWindow(QMainWindow):
     """
@@ -51,16 +57,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.image_paths = []
         
-        # Default stacking parameters
-        self.radius = 3    # Very small radius for maximum sharpness
+        # Default stacking parameters optimized for detail preservation
+        self.radius = 3    # Small radius for maximum detail detection
         self.smoothing = 1 # Minimal smoothing to preserve edges
-        self.enhance_sharpness = True  # Enable sharpness enhancement by default
         
         # Create stacker with default parameters
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing,
-            enhance_sharpness=self.enhance_sharpness
+            smoothing=self.smoothing
         )
         
         self.init_ui()
@@ -82,23 +86,14 @@ class MainWindow(QMainWindow):
         process_btn = QPushButton('Process Stack')
         process_btn.clicked.connect(self.process_stack)
         
-        save_btn = QPushButton('Save Result')
-        save_btn.clicked.connect(self.save_result)
-        save_btn.setEnabled(False)
-        self.save_btn = save_btn
+        stop_btn = QPushButton('Stop Processing')
+        stop_btn.clicked.connect(self.stop_processing)
+        stop_btn.setEnabled(False)
+        self.stop_btn = stop_btn
 
         # Create parameter controls
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
-        
-        # Sharpness enhancement toggle
-        enhance_label = QLabel('Enhance Sharpness:')
-        self.enhance_check = QCheckBox()
-        self.enhance_check.setChecked(self.enhance_sharpness)
-        self.enhance_check.stateChanged.connect(self.update_stacker)
-        
-        enhance_desc = QLabel("Automatically enhance sharpness in poorly focused regions")
-        enhance_desc.setWordWrap(True)
         
         # Radius control
         radius_label = QLabel('Radius:')
@@ -106,7 +101,7 @@ class MainWindow(QMainWindow):
         self.radius_combo.addItems([str(i) for i in range(1, 21)])
         self.radius_combo.setCurrentText(str(self.radius))
         self.radius_combo.currentTextChanged.connect(self.update_stacker)
-        radius_desc = QLabel("Lower values (2-4) maximize sharpness, higher values for smoother blending")
+        radius_desc = QLabel("Lower values (2-3) maximize micro-detail sharpness, higher values (4+) for smoother transitions")
         radius_desc.setWordWrap(True)
         
         # Smoothing control
@@ -115,19 +110,16 @@ class MainWindow(QMainWindow):
         self.smoothing_combo.addItems([str(i) for i in range(1, 11)])
         self.smoothing_combo.setCurrentText(str(self.smoothing))
         self.smoothing_combo.currentTextChanged.connect(self.update_stacker)
-        smoothing_desc = QLabel("Lower values (1-3) preserve edges, higher values smooth transitions")
+        smoothing_desc = QLabel("Lower values (1-2) preserve micro-contrast, higher values (3+) smooth transitions")
         smoothing_desc.setWordWrap(True)
         
         # Add parameter controls to grid
-        params_layout.addWidget(enhance_label, 0, 0)
-        params_layout.addWidget(self.enhance_check, 0, 1)
-        params_layout.addWidget(enhance_desc, 1, 0, 1, 2)
-        params_layout.addWidget(radius_label, 2, 0)
-        params_layout.addWidget(self.radius_combo, 2, 1)
-        params_layout.addWidget(radius_desc, 3, 0, 1, 2)
-        params_layout.addWidget(smoothing_label, 4, 0)
-        params_layout.addWidget(self.smoothing_combo, 4, 1)
-        params_layout.addWidget(smoothing_desc, 5, 0, 1, 2)
+        params_layout.addWidget(radius_label, 0, 0)
+        params_layout.addWidget(self.radius_combo, 0, 1)
+        params_layout.addWidget(radius_desc, 1, 0, 1, 2)
+        params_layout.addWidget(smoothing_label, 2, 0)
+        params_layout.addWidget(self.smoothing_combo, 2, 1)
+        params_layout.addWidget(smoothing_desc, 3, 0, 1, 2)
         
         params_group.setLayout(params_layout)
         
@@ -137,7 +129,7 @@ class MainWindow(QMainWindow):
         
         format_label = QLabel('Format:')
         self.format_combo = QComboBox()
-        self.format_combo.addItems(['PNG (16-bit)', 'JPEG'])  # Remove TIFF for now
+        self.format_combo.addItems(['JPEG'])  # Temporarily remove PNG
 
         color_label = QLabel('Color Space:')
         self.color_combo = QComboBox()
@@ -162,11 +154,21 @@ class MainWindow(QMainWindow):
         
         button_layout = QHBoxLayout()
         button_layout.addWidget(process_btn)
-        button_layout.addWidget(save_btn)
+        button_layout.addWidget(stop_btn)
         layout.addLayout(button_layout)
         
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
+
+    def update_stacker(self):
+        """Update stacker with current parameter values"""
+        self.radius = int(self.radius_combo.currentText())
+        self.smoothing = int(self.smoothing_combo.currentText())
+        
+        self.stacker = FocusStacker(
+            radius=self.radius,
+            smoothing=self.smoothing
+        )
 
     def detect_stack_size(self, image_paths):
         """
@@ -242,9 +244,23 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.current_stack = 0
         self.results = []
+        self.stop_btn.setEnabled(True)
         
         # Process first stack
         self._process_next_stack()
+
+    def stop_processing(self):
+        """Stop the current processing operation"""
+        if hasattr(self, 'thread') and self.thread.isRunning():
+            print("\nStopping processing...")
+            self.thread.stop()  # Signal thread to stop
+            self.thread.wait()  # Wait for thread to finish
+            
+            # Reset UI
+            self.progress_bar.setVisible(False)
+            self.stop_btn.setEnabled(False)
+            self.status_label.setText('Processing stopped')
+            print("Processing stopped")
 
     def _process_next_stack(self):
         """Process the next stack in the queue"""
@@ -291,13 +307,7 @@ class MainWindow(QMainWindow):
         # Save intermediate result
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         filename = f'stack_{self.current_stack + 1}of{len(self.stacks)}_{timestamp}'
-        
-        # Save with selected format
-        selected_format = self.format_combo.currentText()
-        if selected_format == 'PNG (16-bit)':
-            ext = '.png'
-        else:
-            ext = '.jpg'
+        ext = '.jpg'
             
         output_path = os.path.join('output', filename + ext)
         print(f"Creating output directory...")
@@ -305,13 +315,13 @@ class MainWindow(QMainWindow):
         print(f"Saving to: {output_path}")
         
         try:
-            print(f"Saving image with format {selected_format} and color space {self.color_combo.currentText()}")
+            print(f"Saving image with format JPEG and color space {self.color_combo.currentText()}")
             self.stacker.save_image(
                 result,
                 output_path,
-                selected_format,
+                'JPEG',
                 self.color_combo.currentText()
-            )
+            ) 
             print(f"Successfully saved stack result")
             self.results.append(result)
             status_text = f'Completed stack {self.current_stack + 1} of {len(self.stacks)}'
@@ -331,7 +341,7 @@ class MainWindow(QMainWindow):
         print("\n=== All Processing Complete ===")
         print(f"Total stacks processed: {len(self.results)}")
         self.progress_bar.setVisible(False)
-        self.save_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
         status_text = f'Processing complete - {len(self.results)} stacks processed'
         print(status_text)
         self.status_label.setText(status_text)
@@ -342,63 +352,8 @@ class MainWindow(QMainWindow):
         """
         QMessageBox.critical(self, 'Error', f'Processing failed: {error_msg}')
         self.progress_bar.setVisible(False)
+        self.stop_btn.setEnabled(False)
         self.status_label.setText('Processing failed')
-
-    def save_result(self):
-        """Save the processed image"""
-        if not hasattr(self, 'result_image'):
-            return
-
-        # Create output directory if it doesn't exist
-        output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'output')
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Generate default filename with timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        selected_format = self.format_combo.currentText()
-        if selected_format == 'PNG (16-bit)':
-            default_ext = '.png'
-            file_filter = 'PNG (*.png)'
-        else:
-            default_ext = '.jpg'
-            file_filter = 'JPEG (*.jpg)'
-
-        default_filename = f'focus_stacked_{timestamp}{default_ext}'
-        default_path = os.path.join(output_dir, default_filename)
-
-        file_dialog = QFileDialog()
-        file_dialog.setAcceptMode(QFileDialog.AcceptSave)
-        file_dialog.setDirectory(output_dir)
-        file_dialog.selectFile(default_filename)
-        file_dialog.setNameFilter(file_filter)
-            
-        if file_dialog.exec_():
-            file_path = file_dialog.selectedFiles()[0]
-            if not file_path.endswith(default_ext):
-                file_path += default_ext
-                
-            try:
-                self.stacker.save_image(
-                    self.result_image,
-                    file_path,
-                    selected_format,
-                    self.color_combo.currentText()
-                )
-                self.status_label.setText('Image saved successfully')
-            except Exception as e:
-                QMessageBox.critical(self, 'Error', f'Failed to save image: {str(e)}')
-
-    def update_stacker(self):
-        """Update stacker with current parameter values"""
-        self.radius = int(self.radius_combo.currentText())
-        self.smoothing = int(self.smoothing_combo.currentText())
-        self.enhance_sharpness = self.enhance_check.isChecked()
-        
-        self.stacker = FocusStacker(
-            radius=self.radius,
-            smoothing=self.smoothing,
-            enhance_sharpness=self.enhance_sharpness
-        )
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
