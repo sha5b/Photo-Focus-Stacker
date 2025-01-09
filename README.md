@@ -67,25 +67,62 @@ This software has been developed and tested on:
 
 Requirements:
 - NVIDIA GPU with CUDA support (minimum 4GB VRAM recommended)
-- CUDA Toolkit 11.0 or higher
+- CUDA Toolkit 12.x (we use CUDA 12.3)
 - Visual Studio Build Tools (Windows) or GCC (Linux)
 
-For Windows users:
+CUDA Installation Guide:
+
+For Windows:
 1. Install Visual Studio Build Tools 2019 or later with C++ development tools
-2. Install CUDA Toolkit from NVIDIA's website
+2. Download and install CUDA 12.3 from NVIDIA's website:
+   https://developer.nvidia.com/cuda-12-3-0-download-archive
+   - Select Windows
+   - Select your version (10 or 11)
+   - Select your architecture (x86_64)
 3. Ensure your GPU drivers are up to date
 
-For Linux users:
-1. Install GCC and required development tools:
-   ```bash
-   # Ubuntu/Debian
-   sudo apt-get update
-   sudo apt-get install build-essential
+For macOS:
+- Note: CUDA is not supported on macOS since macOS 10.14 (Mojave)
+- For Mac users, this tool will run in CPU-only mode with reduced performance
 
-   # Fedora
-   sudo dnf groupinstall "Development Tools"
-   ```
-2. Install CUDA Toolkit from NVIDIA's website or package manager
+For Linux:
+
+Debian/Ubuntu:
+```bash
+# Add NVIDIA package repositories
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin
+sudo mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600
+wget https://developer.download.nvidia.com/compute/cuda/12.3.0/local_installers/cuda-repo-ubuntu2204-12-3-local_12.3.0-545.23.06-1_amd64.deb
+sudo dpkg -i cuda-repo-ubuntu2204-12-3-local_12.3.0-545.23.06-1_amd64.deb
+sudo cp /var/cuda-repo-ubuntu2204-12-3-local/cuda-*-keyring.gpg /usr/share/keyrings/
+sudo apt update
+sudo apt install cuda-12-3
+```
+
+Fedora:
+```bash
+sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora37/x86_64/cuda-fedora37.repo
+sudo dnf clean all
+sudo dnf module disable nvidia-driver
+sudo dnf -y install cuda-12-3
+```
+
+Arch Linux:
+```bash
+# Install from official repositories
+sudo pacman -S cuda
+```
+
+After installation on any system:
+1. Add CUDA to your PATH (add to your .bashrc or .zshrc):
+```bash
+export PATH=/usr/local/cuda-12.3/bin:$PATH
+export LD_LIBRARY_PATH=/usr/local/cuda-12.3/lib64:$LD_LIBRARY_PATH
+```
+2. Verify installation:
+```bash
+nvcc --version
+```
 
 ## Setup
 
