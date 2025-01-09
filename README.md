@@ -82,7 +82,7 @@ For Windows:
 
 For macOS:
 - Note: CUDA is not supported on macOS since macOS 10.14 (Mojave)
-- For Mac users, this tool will run in CPU-only mode with reduced performance
+- For Mac users, the fallback method for cpu is not implemented, sorry get a real pc.
 
 For Linux:
 
