@@ -6,7 +6,6 @@ This focus stacking tool was developed specifically for the [OpenScan](https://o
 
 Here are some example results from the focus stacking process:
 
-![Focus Stack Result 1](results/stack_2of40_20250108_194643.jpg)
 ![Focus Stack Result 2](results/stack_3of40_20250108_190134.jpg)
 
 These images demonstrate the tool's capability to combine multiple images taken at different focus distances into a single, sharp composite image where the entire subject is in focus.
@@ -149,48 +148,6 @@ stacker = FocusStacker(
     scale_factor=3  # 3x upscaling for enhanced detail
 )
 ```
-
-### Memory Management Tips
-
-1. For large images (>30MP):
-   - Start with scale_factor=1
-   - Process one stack at a time
-   - Close other GPU-intensive applications
-
-2. If you get CUDA out of memory errors:
-   - Reduce scale_factor
-   - Process smaller batches
-   - Free up GPU memory from other applications
-
-## Performance and Results
-
-### Processing Times
-Typical processing times on an RTX 3060 (12GB):
-- 12MP images: ~5-10 seconds per stack
-- 24MP images: ~15-20 seconds per stack
-- 45MP images: ~30-40 seconds per stack
-- >50MP images: May require scale_factor=1 due to memory constraints
-
-Memory usage scales with image resolution and scale_factor. As a rough guide:
-- 12MP images: ~4GB VRAM
-- 24MP images: ~6GB VRAM
-- 45MP images: ~10GB VRAM
-- >50MP images: >12GB VRAM
-
-### Quality Expectations
-- Best results with 5-15 images per stack
-- Excellent detail preservation in microscopy samples
-- Clean edges with minimal artifacts
-- Natural-looking transitions between focus regions
-
-## Known Issues
-
-1. High memory usage with large images (>50MP)
-2. May require manual alignment for extreme focus differences
-3. Limited to NVIDIA GPUs (CUDA requirement)
-4. Some color shifts in high-contrast areas
-5. Occasional alignment issues with highly repetitive patterns
-6. Memory errors possible with large images at high scale factors
 
 ## Contributing
 
