@@ -2,13 +2,15 @@
 
 import os
 import sys
-import re  # Moved import here
+import re
+import os
+# Removed duplicate sys import
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                             QComboBox, QProgressBar, QMessageBox, QGroupBox,
-                            QGridLayout) # Removed QCheckBox
-from PyQt5.QtCore import QThread, pyqtSignal # Removed Qt
+                            QGridLayout, QLineEdit) # Added QLineEdit
+from PyQt5.QtCore import QThread, pyqtSignal
 from focus_stacker import FocusStacker
 
 class FocusStackingThread(QThread):
@@ -16,7 +18,6 @@ class FocusStackingThread(QThread):
     @class FocusStackingThread
     @brief Thread for processing focus stacking to keep UI responsive
     """
-    # Removed unused progress signal
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
@@ -58,12 +59,11 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.image_paths = []
         
-        # Default stacking parameters optimized for photogrammetry
-        self.radius = 2      # Minimum radius for maximum micro-detail preservation
-        self.smoothing = 1   # Minimal smoothing for sharpest possible output
-        # Removed self.scale as upscaling is removed
+        # Default stacking parameters
+        self.radius = 2
+        self.smoothing = 1
         
-        # Create stacker with default parameters (removed scale_factor)
+        # Create stacker instance
         self.stacker = FocusStacker(
             radius=self.radius,
             smoothing=self.smoothing
@@ -75,8 +75,6 @@ class MainWindow(QMainWindow):
         """Creates the QGroupBox for stacking parameters."""
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
-
-        # Removed Scale control UI elements
 
         # Radius control
         radius_label = QLabel('Radius:')
@@ -96,9 +94,8 @@ class MainWindow(QMainWindow):
         smoothing_desc = QLabel("Keep at 1 for photogrammetry to preserve maximum detail, increase only if artifacts appear")
         smoothing_desc.setWordWrap(True)
 
-        # Add parameter controls to grid
+        # Add parameter controls to grid layout
         row = 0
-        # Removed scale controls from layout
         params_layout.addWidget(radius_label, row, 0)
         params_layout.addWidget(self.radius_combo, row, 1)
         row += 1
@@ -117,18 +114,28 @@ class MainWindow(QMainWindow):
         output_group = QGroupBox("Output Settings")
         output_layout = QGridLayout()
 
+        # Output Base Name
+        name_label = QLabel('Output Base Name:')
+        self.output_name_edit = QLineEdit()
+        self.output_name_edit.setPlaceholderText("Default: stack_NofM_timestamp")
+
+        # Format
         format_label = QLabel('Format:')
         self.format_combo = QComboBox()
-        self.format_combo.addItems(['JPEG'])  # Temporarily remove PNG
+        self.format_combo.addItems(['JPEG']) # Only JPEG supported for now
 
+        # Color Space
         color_label = QLabel('Color Space:')
         self.color_combo = QComboBox()
         self.color_combo.addItems(['sRGB'])
 
-        output_layout.addWidget(format_label, 0, 0)
-        output_layout.addWidget(self.format_combo, 0, 1)
-        output_layout.addWidget(color_label, 1, 0)
-        output_layout.addWidget(self.color_combo, 1, 1)
+        # Add widgets to layout
+        output_layout.addWidget(name_label, 0, 0)
+        output_layout.addWidget(self.output_name_edit, 0, 1)
+        output_layout.addWidget(format_label, 1, 0)
+        output_layout.addWidget(self.format_combo, 1, 1)
+        output_layout.addWidget(color_label, 2, 0)
+        output_layout.addWidget(self.color_combo, 2, 1)
 
         output_group.setLayout(output_layout)
         return output_group
@@ -150,14 +157,14 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Focus Stacking Tool')
-        self.setMinimumSize(600, 400) # Keep minimum size
+        self.setMinimumSize(600, 400)
 
-        # --- Central Widget and Main Layout ---
+        # Central Widget and Main Layout
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout(central_widget)
 
-        # --- Create UI Elements using Helper Methods ---
+        # Create UI Elements using Helper Methods
         load_btn = QPushButton('Load Images')
         load_btn.clicked.connect(self.load_images)
 
@@ -165,7 +172,7 @@ class MainWindow(QMainWindow):
         output_group = self._create_output_group()
         action_button_layout = self._create_action_buttons()
 
-        # --- Status Label and Progress Bar ---
+        # Status Label and Progress Bar
         self.status_label = QLabel('Ready')
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -174,7 +181,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(load_btn)
         layout.addWidget(params_group)
         layout.addWidget(output_group)
-        layout.addLayout(action_button_layout) # Add the button layout
+        layout.addLayout(action_button_layout)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
 
@@ -183,8 +190,7 @@ class MainWindow(QMainWindow):
         self.radius = int(self.radius_combo.currentText())
         self.smoothing = int(self.smoothing_combo.currentText())
         
-        # Removed reading scale from combo box
-        # Update stacker without scale_factor
+        # Update stacker instance with new parameters
         self.stacker = FocusStacker(
             radius=self.radius,
             smoothing=self.smoothing
@@ -196,42 +202,39 @@ class MainWindow(QMainWindow):
         @param image_paths List of image paths
         @return Number of images per stack
         """
-        # Group files by their base name (everything before the last number)
+        # Group files by base name (part before the last number sequence)
         stacks = {}
         for path in image_paths:
-            # Get filename without extension
             filename = os.path.splitext(os.path.basename(path))[0]
-            # Find last number in filename
-            match = re.search(r'^(.+?)(\d+)$', filename)
+            match = re.search(r'^(.+?)(\d+)$', filename) # Find base name and trailing number
             if match:
-                base_name = match.group(1)  # Everything before the last number
-                number = int(match.group(2))  # The last number
+                base_name = match.group(1)
+                number = int(match.group(2))
                 if base_name not in stacks:
                     stacks[base_name] = []
                 stacks[base_name].append(number)
         
         if not stacks:
-            print("Warning: No numbered sequences found in filenames")
-            return len(image_paths)  # Treat all images as one stack
+            print("Warning: No numbered sequences found in filenames.")
+            return len(image_paths) # Treat all images as one stack if no sequences detected
             
-        # Sort numbers in each stack
+        # Sort numbers within each detected stack
         for numbers in stacks.values():
             numbers.sort()
             
-        # Verify sequences are continuous
+        # Verify if sequences are continuous (optional check)
         for base_name, numbers in stacks.items():
-            expected = list(range(min(numbers), max(numbers) + 1))
-            if numbers != expected:
+            if numbers != list(range(min(numbers), max(numbers) + 1)):
                 print(f"Warning: Non-continuous sequence for {base_name}: {numbers}")
                 
-        # Find most common stack size
+        # Determine stack size based on the most common sequence length
         sizes = [len(numbers) for numbers in stacks.values()]
         if sizes:
-            size = max(set(sizes), key=sizes.count)  # Most common size
-            print(f"Detected stack size: {size}")
-            return size
+            detected_size = max(set(sizes), key=sizes.count)
+            print(f"Detected stack size: {detected_size}")
+            return detected_size
             
-        return len(image_paths)  # Default to all images as one stack
+        return len(image_paths) # Fallback if size detection fails
 
     def load_images(self):
         """Open file dialog to select images"""
@@ -240,7 +243,7 @@ class MainWindow(QMainWindow):
         file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.tif *.tiff)")
         
         if file_dialog.exec_():
-            self.image_paths = sorted(file_dialog.selectedFiles())  # Sort for consistent order
+            self.image_paths = sorted(file_dialog.selectedFiles()) # Sort for consistent processing order
             print("\nLoaded images:", self.image_paths)
             
             stack_size = self.detect_stack_size(self.image_paths)
@@ -261,20 +264,19 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.current_stack = 0
-        self.processed_stack_count = 0 # Replaced self.results list with a counter
+        self.processed_stack_count = 0
         self.stop_btn.setEnabled(True)
         
-        # Process first stack
-        self._process_next_stack()
+        self._process_next_stack() # Start processing the first stack
 
     def stop_processing(self):
         """Stop the current processing operation"""
         if hasattr(self, 'thread') and self.thread.isRunning():
             print("\nStopping processing...")
-            self.thread.stop()  # Signal thread to stop
-            self.thread.wait()  # Wait for thread to finish
+            self.thread.stop() # Signal thread to stop
+            self.thread.wait() # Wait for thread to finish cleanly
             
-            # Reset UI
+            # Reset UI state
             self.progress_bar.setVisible(False)
             self.stop_btn.setEnabled(False)
             self.status_label.setText('Processing stopped')
@@ -287,53 +289,60 @@ class MainWindow(QMainWindow):
             self.processing_all_finished()
             return
             
-        # Calculate overall progress
+        # Update overall progress bar
         overall_progress = (self.current_stack * 100) // len(self.stacks)
         self.progress_bar.setValue(overall_progress)
         
+        current_image_stack = self.stacks[self.current_stack]
         print(f"\n=== Processing stack {self.current_stack + 1}/{len(self.stacks)} ===")
-        print(f"Stack contains {len(self.stacks[self.current_stack])} images")
-        print("Stack images:", self.stacks[self.current_stack])
+        print(f"Stack contains {len(current_image_stack)} images")
+        print("Stack images:", current_image_stack)
         
-        # Create and start processing thread
+        # Create and start processing thread for the current stack
         self.thread = FocusStackingThread(
             self.stacker,
-            self.stacks[self.current_stack],
+            current_image_stack,
             self.color_combo.currentText()
         )
-        # Removed connection to unused progress signal
         self.thread.finished.connect(self.processing_one_finished)
         self.thread.error.connect(self.processing_error)
         self.thread.start()
 
-    # Removed unused update_stack_progress method
-
     def processing_one_finished(self, result):
         """Handle completion of one stack
-        @param result Processed image
+        @param result Processed image (NumPy array)
         """
         print(f"\n=== Saving result for stack {self.current_stack + 1} ===")
         
-        # Save intermediate result
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'stack_{self.current_stack + 1}of{len(self.stacks)}_{timestamp}'
-        ext = '.jpg'
+        # Determine filename based on user input or default
+        base_name = self.output_name_edit.text().strip()
+        ext = '.jpg' # Hardcoded for now based on format combo
+        
+        if base_name:
+            # Use user-provided base name
+            filename = f'{base_name}_{self.current_stack + 1}of{len(self.stacks)}{ext}'
+        else:
+            # Fallback to default timestamp-based name
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f'stack_{self.current_stack + 1}of{len(self.stacks)}_{timestamp}{ext}'
             
-        output_path = os.path.join('output', filename + ext)
-        print(f"Creating output directory...")
-        os.makedirs('output', exist_ok=True)
-        print(f"Saving to: {output_path}")
+        output_dir = 'output' # Hardcoded output directory for now
+        output_path = os.path.join(output_dir, filename)
         
         try:
-            print(f"Saving image with format JPEG and color space {self.color_combo.currentText()}")
+            # Ensure output directory exists
+            os.makedirs(output_dir, exist_ok=True)
+            print(f"Saving to: {output_path}")
+            
+            # Save the resulting image
             self.stacker.save_image(
                 result,
                 output_path,
-                'JPEG',
+                'JPEG', # Hardcoded for now
                 self.color_combo.currentText()
             ) 
-            print(f"Successfully saved stack result")
-            self.processed_stack_count += 1 # Increment counter instead of appending to list
+            print(f"Successfully saved stack result.")
+            self.processed_stack_count += 1
             status_text = f'Completed stack {self.current_stack + 1} of {len(self.stacks)}'
             print(status_text)
             self.status_label.setText(status_text)
@@ -341,18 +350,19 @@ class MainWindow(QMainWindow):
             error_msg = f'Failed to save image: {str(e)}'
             print(f"ERROR: {error_msg}")
             QMessageBox.critical(self, 'Error', error_msg)
+            # Stop processing further stacks on save error? Or continue? Currently continues.
             
-        # Process next stack
+        # Process the next stack
         self.current_stack += 1
         self._process_next_stack()
 
     def processing_all_finished(self):
         """Handle completion of all stacks"""
         print("\n=== All Processing Complete ===")
-        print(f"Total stacks processed: {self.processed_stack_count}") # Use counter
+        print(f"Total stacks processed: {self.processed_stack_count}")
         self.progress_bar.setVisible(False)
         self.stop_btn.setEnabled(False)
-        status_text = f'Processing complete - {self.processed_stack_count} stacks processed' # Use counter
+        status_text = f'Processing complete - {self.processed_stack_count} stacks processed.'
         print(status_text)
         self.status_label.setText(status_text)
 
