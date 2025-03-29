@@ -2,12 +2,13 @@
 
 import os
 import sys
+import re  # Moved import here
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                             QHBoxLayout, QPushButton, QLabel, QFileDialog, 
                             QComboBox, QProgressBar, QMessageBox, QGroupBox,
-                            QGridLayout, QCheckBox)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+                            QGridLayout) # Removed QCheckBox
+from PyQt5.QtCore import QThread, pyqtSignal # Removed Qt
 from focus_stacker import FocusStacker
 
 class FocusStackingThread(QThread):
@@ -15,7 +16,7 @@ class FocusStackingThread(QThread):
     @class FocusStackingThread
     @brief Thread for processing focus stacking to keep UI responsive
     """
-    progress = pyqtSignal(int)
+    # Removed unused progress signal
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
 
@@ -60,56 +61,23 @@ class MainWindow(QMainWindow):
         # Default stacking parameters optimized for photogrammetry
         self.radius = 2      # Minimum radius for maximum micro-detail preservation
         self.smoothing = 1   # Minimal smoothing for sharpest possible output
-        self.scale = 2       # Default 2x upscaling for processing
+        # Removed self.scale as upscaling is removed
         
-        # Create stacker with default parameters
+        # Create stacker with default parameters (removed scale_factor)
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing,
-            scale_factor=self.scale
+            smoothing=self.smoothing
         )
         
         self.init_ui()
 
-    def init_ui(self):
-        """Initialize the user interface"""
-        self.setWindowTitle('Focus Stacking Tool')
-        self.setMinimumSize(600, 400)
-
-        # Create central widget and layout
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        layout = QVBoxLayout(central_widget)
-
-        # Create buttons
-        load_btn = QPushButton('Load Images')
-        load_btn.clicked.connect(self.load_images)
-        
-        process_btn = QPushButton('Process Stack')
-        process_btn.clicked.connect(self.process_stack)
-        
-        stop_btn = QPushButton('Stop Processing')
-        stop_btn.clicked.connect(self.stop_processing)
-        stop_btn.setEnabled(False)
-        self.stop_btn = stop_btn
-
-        # Create parameter controls
+    def _create_parameter_group(self):
+        """Creates the QGroupBox for stacking parameters."""
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
-        
-        # Scale control
-        scale_label = QLabel('Processing Scale:')
-        self.scale_combo = QComboBox()
-        self.scale_combo.addItems(['1x', '2x', '3x', '4x'])
-        self.scale_combo.setCurrentText(f"{self.scale}x")
-        self.scale_combo.currentTextChanged.connect(self.update_stacker)
-        scale_desc = QLabel("Higher values may improve detail but increase processing time. 2x recommended.")
-        scale_desc.setWordWrap(True)
-        
-        params_layout.addWidget(scale_label, 0, 0)
-        params_layout.addWidget(self.scale_combo, 0, 1)
-        params_layout.addWidget(scale_desc, 1, 0, 1, 2)
-        
+
+        # Removed Scale control UI elements
+
         # Radius control
         radius_label = QLabel('Radius:')
         self.radius_combo = QComboBox()
@@ -118,7 +86,7 @@ class MainWindow(QMainWindow):
         self.radius_combo.currentTextChanged.connect(self.update_stacker)
         radius_desc = QLabel("Use 2 for maximum sharpness in photogrammetry, 3+ only if noise becomes problematic")
         radius_desc.setWordWrap(True)
-        
+
         # Smoothing control
         smoothing_label = QLabel('Smoothing:')
         self.smoothing_combo = QComboBox()
@@ -127,36 +95,28 @@ class MainWindow(QMainWindow):
         self.smoothing_combo.currentTextChanged.connect(self.update_stacker)
         smoothing_desc = QLabel("Keep at 1 for photogrammetry to preserve maximum detail, increase only if artifacts appear")
         smoothing_desc.setWordWrap(True)
-        
-        # Add parameter controls to grid in correct order
+
+        # Add parameter controls to grid
         row = 0
-        
-        # Scale control (first)
-        params_layout.addWidget(scale_label, row, 0)
-        params_layout.addWidget(self.scale_combo, row, 1)
-        row += 1
-        params_layout.addWidget(scale_desc, row, 0, 1, 2)
-        row += 1
-        
-        # Radius control (second)
+        # Removed scale controls from layout
         params_layout.addWidget(radius_label, row, 0)
         params_layout.addWidget(self.radius_combo, row, 1)
         row += 1
         params_layout.addWidget(radius_desc, row, 0, 1, 2)
         row += 1
-        
-        # Smoothing control (third)
         params_layout.addWidget(smoothing_label, row, 0)
         params_layout.addWidget(self.smoothing_combo, row, 1)
         row += 1
         params_layout.addWidget(smoothing_desc, row, 0, 1, 2)
-        
+
         params_group.setLayout(params_layout)
-        
-        # Create output format controls
+        return params_group
+
+    def _create_output_group(self):
+        """Creates the QGroupBox for output settings."""
         output_group = QGroupBox("Output Settings")
         output_layout = QGridLayout()
-        
+
         format_label = QLabel('Format:')
         self.format_combo = QComboBox()
         self.format_combo.addItems(['JPEG'])  # Temporarily remove PNG
@@ -164,29 +124,57 @@ class MainWindow(QMainWindow):
         color_label = QLabel('Color Space:')
         self.color_combo = QComboBox()
         self.color_combo.addItems(['sRGB'])
-        
+
         output_layout.addWidget(format_label, 0, 0)
         output_layout.addWidget(self.format_combo, 0, 1)
         output_layout.addWidget(color_label, 1, 0)
         output_layout.addWidget(self.color_combo, 1, 1)
-        
-        output_group.setLayout(output_layout)
 
-        # Create status label and progress bar
+        output_group.setLayout(output_layout)
+        return output_group
+
+    def _create_action_buttons(self):
+        """Creates the main action buttons and their layout."""
+        process_btn = QPushButton('Process Stack')
+        process_btn.clicked.connect(self.process_stack)
+
+        self.stop_btn = QPushButton('Stop Processing')
+        self.stop_btn.clicked.connect(self.stop_processing)
+        self.stop_btn.setEnabled(False)
+
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(process_btn)
+        button_layout.addWidget(self.stop_btn)
+        return button_layout
+
+    def init_ui(self):
+        """Initialize the user interface"""
+        self.setWindowTitle('Focus Stacking Tool')
+        self.setMinimumSize(600, 400) # Keep minimum size
+
+        # --- Central Widget and Main Layout ---
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+
+        # --- Create UI Elements using Helper Methods ---
+        load_btn = QPushButton('Load Images')
+        load_btn.clicked.connect(self.load_images)
+
+        params_group = self._create_parameter_group()
+        output_group = self._create_output_group()
+        action_button_layout = self._create_action_buttons()
+
+        # --- Status Label and Progress Bar ---
         self.status_label = QLabel('Ready')
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
 
-        # Add all widgets to main layout
+        # --- Assemble Main Layout ---
         layout.addWidget(load_btn)
         layout.addWidget(params_group)
         layout.addWidget(output_group)
-        
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(process_btn)
-        button_layout.addWidget(stop_btn)
-        layout.addLayout(button_layout)
-        
+        layout.addLayout(action_button_layout) # Add the button layout
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.status_label)
 
@@ -195,11 +183,11 @@ class MainWindow(QMainWindow):
         self.radius = int(self.radius_combo.currentText())
         self.smoothing = int(self.smoothing_combo.currentText())
         
-        self.scale = int(self.scale_combo.currentText().replace('x', ''))
+        # Removed reading scale from combo box
+        # Update stacker without scale_factor
         self.stacker = FocusStacker(
             radius=self.radius,
-            smoothing=self.smoothing,
-            scale_factor=self.scale
+            smoothing=self.smoothing
         )
 
     def detect_stack_size(self, image_paths):
@@ -208,8 +196,6 @@ class MainWindow(QMainWindow):
         @param image_paths List of image paths
         @return Number of images per stack
         """
-        import re
-        
         # Group files by their base name (everything before the last number)
         stacks = {}
         for path in image_paths:
@@ -275,7 +261,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.current_stack = 0
-        self.results = []
+        self.processed_stack_count = 0 # Replaced self.results list with a counter
         self.stop_btn.setEnabled(True)
         
         # Process first stack
@@ -315,20 +301,12 @@ class MainWindow(QMainWindow):
             self.stacks[self.current_stack],
             self.color_combo.currentText()
         )
-        self.thread.progress.connect(lambda p: self.update_stack_progress(p, overall_progress))
+        # Removed connection to unused progress signal
         self.thread.finished.connect(self.processing_one_finished)
         self.thread.error.connect(self.processing_error)
         self.thread.start()
 
-    def update_stack_progress(self, stack_progress, overall_base):
-        """Update progress bar with combined progress
-        @param stack_progress Progress of current stack (0-100)
-        @param overall_base Base progress from completed stacks
-        """
-        # Scale stack progress to portion of total progress
-        stack_portion = stack_progress / len(self.stacks)
-        total_progress = overall_base + stack_portion
-        self.progress_bar.setValue(int(total_progress))
+    # Removed unused update_stack_progress method
 
     def processing_one_finished(self, result):
         """Handle completion of one stack
@@ -355,7 +333,7 @@ class MainWindow(QMainWindow):
                 self.color_combo.currentText()
             ) 
             print(f"Successfully saved stack result")
-            self.results.append(result)
+            self.processed_stack_count += 1 # Increment counter instead of appending to list
             status_text = f'Completed stack {self.current_stack + 1} of {len(self.stacks)}'
             print(status_text)
             self.status_label.setText(status_text)
@@ -371,10 +349,10 @@ class MainWindow(QMainWindow):
     def processing_all_finished(self):
         """Handle completion of all stacks"""
         print("\n=== All Processing Complete ===")
-        print(f"Total stacks processed: {len(self.results)}")
+        print(f"Total stacks processed: {self.processed_stack_count}") # Use counter
         self.progress_bar.setVisible(False)
         self.stop_btn.setEnabled(False)
-        status_text = f'Processing complete - {len(self.results)} stacks processed'
+        status_text = f'Processing complete - {self.processed_stack_count} stacks processed' # Use counter
         print(status_text)
         self.status_label.setText(status_text)
 
