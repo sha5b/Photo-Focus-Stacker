@@ -19,172 +19,131 @@ These images demonstrate the tool's capability to combine multiple images taken 
 python src/main.py
 ```
 
-2. Using the tool:
-   - Click "Select Images" to choose your focus stack images
-   - Images should be taken at different focus distances of the same subject
-   - Name your images with sequential numbers (e.g., scan_1.jpg, scan_2.jpg, etc.) For best results check the output filenames of your Openscanner, should be ok.
-   - All images in a stack should be taken with the same camera settings
-   - Recommended: 5-15 images per stack with small focus steps
-
-3. Processing:
-   - Select your output folder
-   - Click "Process Stack" to start focus stacking
-   - The tool will automatically align and blend your images
-   - Results will be saved in your chosen output folder
+2. **Load Images:** Click "Load Images" and select the image files for your focus stack. Images should ideally be named sequentially (e.g., `img_001.jpg`, `img_002.jpg`). The tool will attempt to automatically group them into stacks.
+3. **Configure Parameters:** Adjust the stacking parameters in the UI as needed:
+    *   **Alignment:** Choose the image alignment method (e.g., 'orb').
+    *   **Focus Measure:** Select how image sharpness is determined (e.g., 'custom').
+    *   **Blending:** Choose the method for combining images (e.g., 'weighted', 'laplacian').
+    *   **Laplacian Levels:** (Only for 'laplacian' blending) Number of pyramid levels.
+    *   **Consistency Filter:** (Only for 'laplacian' blending) Check to apply a median filter to reduce noise in the selection map. Adjust kernel size if needed.
+    *   **Post-processing:** Check to apply contrast adjustment and sharpening.
+4. **Output Settings:** Optionally set a base name for the output files.
+5. **Process:** Click "Process Stack". The results will be saved in the `results/` directory.
 
 ### Tips for Best Results
 
-1. Image Capture:
-   - Use a stable setup (tripod or scanning rig)
-   - Keep consistent lighting
-   - Use manual focus and consistent camera settings
-   - Take more images than you think you need (small focus steps)
-   - Ensure good overlap between focus areas
+*   **Stability:** Use a stable setup (tripod, copy stand, scanner) to minimize movement between shots.
+*   **Lighting:** Keep lighting consistent across all images in a stack.
+*   **Settings:** Use manual focus and consistent camera settings (aperture, shutter speed, ISO).
+*   **Overlap:** Ensure sufficient overlap in focus between consecutive images. Small focus steps are better than large ones.
+*   **Sequence:** Take enough images to cover the entire depth of field of your subject.
 
-2. For Photogrammetry:
-   - Ensure the main subject is perfectly sharp
-   - Background blur is acceptable and normal
-   - Use enough images to capture all depth levels of your subject
+## Installation
 
-Advanced focus stacking implementation optimized for microscopy and macro photography, with GPU acceleration using CUDA. This tool is specifically designed for handling the unique challenges of microscopy and macro photography, including high magnification, shallow depth of field, and the need for precise alignment.
+This tool requires Python 3 (3.8 or higher recommended) and several Python packages.
 
-Perfect for:
-- Photogrammetry and 3D scanning
-- Microscopy imaging (biological, metallurgical, etc.)
-- Macro photography (insects, minerals, small objects)
-- Product photography requiring full depth of field
-- Scientific documentation and research
+1.  **Clone the Repository:**
+    ```bash
+    git clone https://github.com/your-username/Photo-Focus-Stacker.git # Replace with actual URL if different
+    cd Photo-Focus-Stacker
+    ```
 
-[!["Buy Me A Coffee"](https://www.buymeacoffee.com/assets/img/guidelines/download-assets-2.svg)](https://buymeacoffee.com/sha5b)
+2.  **Create a Virtual Environment:** (Recommended)
+    ```bash
+    # Windows
+    python -m venv venv
+    venv\Scripts\activate
 
-## System Requirements & Testing Environment
+    # macOS / Linux
+    python3 -m venv venv
+    source venv/bin/activate
+    ```
 
-This software has been developed and tested on:
-- Windows 11
-- NVIDIA RTX 3080 Ti with CUDA 12.x
-- Python 3.8 or higher
+3.  **Install Requirements:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+    *Note: This installs packages like OpenCV, NumPy, PyQt5, etc.*
 
-Requirements:
-- NVIDIA GPU with CUDA support (minimum 4GB VRAM recommended)
-- CUDA Toolkit 12.x (we use CUDA 12.3)
-- Visual Studio Build Tools (Windows) or GCC (Linux)
+## Running the Application
 
-CUDA Installation Guide:
-
-For Windows:
-1. Install Visual Studio Build Tools 2019 or later with C++ development tools
-2. Download and install CUDA 12.3 from NVIDIA's website:
-   https://developer.nvidia.com/cuda-12-3-0-download-archive
-   - Select Windows
-   - Select your version (10 or 11)
-   - Select your architecture (x86_64)
-3. Ensure your GPU drivers are up to date
-
-For macOS:
-- Note: CUDA is not supported on macOS since macOS 10.14 (Mojave)
-- For Mac users, the fallback method for cpu is not implemented, sorry get a real pc.
-
-For Linux:
-
-Debian/Ubuntu:
+Once installed, run the GUI using:
 ```bash
-# Add NVIDIA package repositories
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-ubuntu2204.pin
-sudo mv cuda-ubuntu2204.pin /etc/apt/preferences.d/cuda-repository-pin-600
-wget https://developer.download.nvidia.com/compute/cuda/12.3.0/local_installers/cuda-repo-ubuntu2204-12-3-local_12.3.0-545.23.06-1_amd64.deb
-sudo dpkg -i cuda-repo-ubuntu2204-12-3-local_12.3.0-545.23.06-1_amd64.deb
-sudo cp /var/cuda-repo-ubuntu2204-12-3-local/cuda-*-keyring.gpg /usr/share/keyrings/
-sudo apt update
-sudo apt install cuda-12-3
-```
-
-Fedora:
-```bash
-sudo dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora37/x86_64/cuda-fedora37.repo
-sudo dnf clean all
-sudo dnf module disable nvidia-driver
-sudo dnf -y install cuda-12-3
-```
-
-Arch Linux:
-```bash
-# Install from official repositories
-sudo pacman -S cuda
-```
-
-After installation on any system:
-1. Add CUDA to your PATH (add to your .bashrc or .zshrc):
-```bash
-export PATH=/usr/local/cuda-12.3/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.3/lib64:$LD_LIBRARY_PATH
-```
-2. Verify installation:
-```bash
-nvcc --version
-```
-
-## Setup
-
-1. Create and activate a virtual environment:
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Linux/Mac
-python3 -m venv venv
-source venv/bin/activate
-```
-
-2. Install requirements:
-```bash
-pip install -r requirements.txt
+python src/main.py
 ```
 
 ## Advanced Usage (Python API)
 
-For advanced users who want to integrate the focus stacking into their own scripts:
+You can integrate the focus stacking logic into your own Python scripts.
 
 ```python
-from focus_stacker import FocusStacker
-
-# Initialize stacker with default settings
-stacker = FocusStacker()
-
-# Process a single stack
-result = stacker.process_stack(['image1.jpg', 'image2.jpg', 'image3.jpg'])
-stacker.save_image(result, 'output.jpg')
-
-# Process multiple stacks in a directory
+# Ensure you are in the project's root directory or have src in your Python path
+from src.focus_stacker import FocusStacker
+from src.utils import save_image, split_into_stacks # Import necessary utils
 import glob
-image_paths = glob.glob('path/to/images/*.jpg')
-stacks = stacker.split_into_stacks(image_paths, stack_size=3)
+import os
 
-for i, stack in enumerate(stacks):
-    result = stacker.process_stack(stack)
-    stacker.save_image(result, f'output_{i+1}.jpg')
-```
+# --- Example 1: Process a single stack with default settings ---
+print("Processing single stack...")
+stacker_defaults = FocusStacker() # Uses default parameters
+image_files = sorted(glob.glob('path/to/your/stack/*.jpg')) # Get your image files
+if image_files:
+    result_default = stacker_defaults.process_stack(image_files)
+    save_image(result_default, 'results/output_default.jpg')
+    print("Saved default result.")
+else:
+    print("No images found for single stack example.")
 
-### Options
 
-The `FocusStacker` class accepts several parameters to fine-tune the stacking process:
-
-- `radius` (1-20, default: 8): Size of the focus measure window. Larger values can help with noisy images but may reduce detail.
-- `smoothing` (1-10, default: 4): Amount of smoothing applied to focus maps. Higher values reduce noise but may affect edge detection.
-- `scale_factor` (1-4, default: 2): Processing scale multiplier:
-  - 1 = original resolution
-  - 2 = 2x upscaling (recommended)
-  - 3 = 3x upscaling (more detail, slower)
-  - 4 = 4x upscaling (maximum detail, much slower)
-
-Example with custom options:
-```python
-stacker = FocusStacker(
-    radius=10,      # Larger focus window
-    smoothing=3,    # Less smoothing for more detail
-    scale_factor=3  # 3x upscaling for enhanced detail
+# --- Example 2: Process multiple stacks with custom settings ---
+print("\nProcessing multiple stacks with custom settings...")
+stacker_custom = FocusStacker(
+    align_method='orb',
+    focus_measure_method='custom',
+    blend_method='laplacian',
+    consistency_filter=True,
+    consistency_kernel=7,
+    postprocess=True,
+    laplacian_levels=6
 )
+
+all_images = sorted(glob.glob('path/to/all/images/*.tif')) # Get all images
+if all_images:
+    # Auto-detect stacks based on filenames (e.g., stack1_001.tif, stack1_002.tif, stack2_001.tif)
+    stacks = split_into_stacks(all_images, stack_size=0) # stack_size=0 for auto-detect
+
+    if not stacks:
+        print("Could not detect stacks, treating all images as one.")
+        stacks = [all_images] # Fallback to single stack
+
+    output_dir = 'results/custom_stacks'
+    os.makedirs(output_dir, exist_ok=True)
+
+    for i, stack in enumerate(stacks):
+        print(f"\nProcessing custom stack {i+1}/{len(stacks)}...")
+        if stack:
+            result_custom = stacker_custom.process_stack(stack)
+            output_filename = f'custom_stack_{i+1}.png' # Save as PNG
+            save_image(result_custom, os.path.join(output_dir, output_filename), format='PNG')
+            print(f"Saved custom result {i+1}.")
+        else:
+            print(f"Skipping empty stack {i+1}.")
+else:
+    print("No images found for multiple stacks example.")
+
 ```
+
+### `FocusStacker` Options
+
+When initializing `FocusStacker`, you can customize its behavior:
+
+*   `align_method` (str, default='orb'): Method for aligning images. Options: 'orb'. ('ecc' is a placeholder).
+*   `focus_measure_method` (str, default='custom'): Method for measuring focus. Options: 'custom', 'laplacian_variance' (uses absolute Laplacian map).
+*   `blend_method` (str, default='weighted'): Method for blending images. Options: 'weighted', 'laplacian'.
+*   `consistency_filter` (bool, default=False): Apply median filter to the sharpness map before Laplacian blending. Helps reduce noise.
+*   `consistency_kernel` (int, default=5): Kernel size for the consistency filter (must be odd).
+*   `postprocess` (bool, default=True): Apply contrast/brightness adjustment and sharpening after blending.
+*   `laplacian_levels` (int, default=5): Number of pyramid levels used in Laplacian blending.
 
 ## Contributing
 
