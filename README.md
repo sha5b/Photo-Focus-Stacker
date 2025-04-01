@@ -45,6 +45,26 @@ For most stacks, the default settings are a reasonable starting point:
 *   Sharpening: `0.0`
 *   Blending: `Weighted Blending`
 
+**Example: Settings for Best Quality (Potentially Slower):**
+
+If quality is paramount and processing time is less critical, you might try:
+*   Pyramid Levels: `4` or `5` (Handles larger misalignments more accurately)
+*   Mask Threshold: `8` (Focuses alignment on stronger edges)
+*   Focus Window: `5` (Captures finer focus detail, but check for noise)
+*   Sharpening: `0.0` (Apply sharpening later if needed, starting clean)
+*   Blending: `Weighted Blending` (Generally smoother results)
+*Note: These settings increase processing time, especially the pyramid levels.*
+
+**Example: Settings for Fastest Speed (Potentially Lower Quality):**
+
+If speed is the main goal (e.g., for quick previews):
+*   Pyramid Levels: `1` (Fastest alignment, assumes minimal image shift)
+*   Mask Threshold: `10` (Default is usually fine for speed)
+*   Focus Window: `7` (Default is a balance)
+*   Sharpening: `0.0` (Sharpening adds time)
+*   Blending: `Direct Map Selection` (May be slightly faster than weighted)
+*Note: Using Pyramid Level 1 may fail if images are not well-aligned initially. Direct Map blending might introduce artifacts.*
+
 **Combinations to Watch Out For (Potentially "Bad" Settings):**
 
 While results depend heavily on the source images, some combinations tend to cause issues:
