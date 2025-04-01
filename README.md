@@ -2,14 +2,6 @@
 
 This focus stacking tool was developed specifically for the [OpenScan](https://openscan.eu) community to enable high-quality focus stacking for photogrammetry and 3D scanning applications. OpenScan is an open-source 3D scanner project that makes professional 3D scanning accessible to everyone.
 
-## Results
-
-Here are some example results from the focus stacking process:
-
-![Focus Stack Result 2](results/stack_3of40_20250108_190134.jpg)
-
-These images demonstrate the tool's capability to combine multiple images taken at different focus distances into a single, sharp composite image where the entire subject is in focus.
-
 ## Quick Start Guide
 
 ### Using the GUI
