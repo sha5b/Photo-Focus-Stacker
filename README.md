@@ -28,13 +28,21 @@ python src/main.py
 
 The core algorithms (Pyramid ECC Homography alignment, Laplacian Variance focus measure) are fixed for robustness. You can tune the following parameters in the GUI:
 
-*   **Alignment Pyramid Levels:** (Default: 3) Number of levels for alignment. More levels (e.g., 4, 5) can handle larger misalignments but are slower. Fewer levels (e.g., 1, 2) are faster but may fail if images are significantly shifted. `1` means no pyramid.
-*   **Alignment Mask Threshold:** (Default: 10) Threshold for the edge mask used during alignment. Lower values (e.g., 5) focus alignment on stronger edges, potentially ignoring textureless areas. Higher values (e.g., 20, 30) include weaker edges, which might help in low-contrast areas but could be influenced by noise.
-*   **Focus Window Size:** (Default: 7) Size (pixels) of the sliding window used to calculate local sharpness (Laplacian Variance). Must be odd. Smaller values (e.g., 5) capture finer focus detail but can make the focus map noisy. Larger values (e.g., 9, 11) produce smoother maps but might blur the transitions between focused regions.
-*   **Sharpening Strength:** (Default: 0.0) Controls the amount of Unsharp Masking applied *after* stacking. `0.0` means no sharpening. Values `0.5` to `1.0` provide moderate sharpening. Higher values increase apparent sharpness but can significantly amplify noise and create "halos" around edges.
-*   **Blending Method:** (Default: Weighted Blending) How the final image is constructed from the sharp regions of the source images.
-    *   `Weighted Blending`: Smoothly blends pixels based on their focus score and the scores of neighboring pixels/images. Generally produces smoother results with fewer artifacts. **Recommended starting point.**
-    *   `Direct Map Selection`: For each pixel, directly selects the value from the single source image deemed sharpest at that point. Can produce very sharp results but is more prone to noise and abrupt transitions (artifacts) at focus boundaries, especially if the focus map is noisy (e.g., from a small `Focus Window Size`).
+*   **Alignment Pyramid Levels:** (Default: 3) Controls the multi-resolution strategy for image alignment. The alignment starts on downscaled images (higher pyramid levels) and refines on progressively larger versions.
+    *   **Increase:** Improves the ability to align images with larger shifts or rotations between them. Increases processing time significantly. Try `4` or `5` if alignment fails or seems inaccurate with large movements.
+    *   **Decrease:** Speeds up alignment considerably. May fail if there are significant movements between images. `1` disables the pyramid approach entirely (fastest, but least robust to large shifts).
+*   **Alignment Mask Threshold:** (Default: 10) Sets the minimum edge strength required for a pixel to be considered during the ECC alignment process. Alignment focuses on matching these edge pixels.
+    *   **Increase:** Makes the alignment more permissive, including weaker edges. This might help alignment in low-contrast areas but can also make it more susceptible to being influenced by noise or unimportant textures. Try `15` or `20`.
+    *   **Decrease:** Makes the alignment stricter, focusing only on strong edges. This can improve robustness against noise but might fail if the overlapping regions lack strong edge features. Try `5` or `8`.
+*   **Focus Window Size:** (Default: 7) The side length (in pixels) of the square window used to calculate the local focus score (variance of Laplacian) around each pixel. Must be an odd number.
+    *   **Increase:** Averages focus scores over a larger area, resulting in a smoother focus map with less noise. However, this can blur the transitions between focused regions, potentially causing slight blurring or loss of fine detail in the final blended image. Try `9` or `11`.
+    *   **Decrease:** Calculates focus scores over a smaller area, allowing for finer detail in the focus map and potentially sharper transitions between focused regions. However, this makes the focus map much more sensitive to noise in the source images. Try `5`. Using `3` is often too noisy.
+*   **Sharpening Strength:** (Default: 0.0) Controls the intensity of an Unsharp Mask filter applied to the *final* stacked image.
+    *   **Increase:** Enhances the apparent sharpness and contrast of edges and details. Values around `0.5` to `1.0` provide moderate sharpening. Higher values (> 1.0) often lead to excessive noise amplification and visible "halos" around edges.
+    *   **Decrease:** Reduces the sharpening effect. `0.0` disables sharpening completely, which is often recommended initially, allowing sharpening to be done later in dedicated software if desired.
+*   **Blending Method:** (Default: Weighted Blending) Determines how the final composite image is assembled from the sharpest parts of the aligned source images, based on the calculated focus map.
+    *   `Weighted Blending`: Creates a smooth transition between images by blending pixels based on their focus scores and the scores of neighbors. This generally produces fewer artifacts and handles slightly noisy focus maps better. **Recommended starting point.**
+    *   `Direct Map Selection`: For each pixel location, directly copies the pixel value from the single source image that had the highest focus score at that exact location. This can result in maximum sharpness but is very sensitive to noise in the focus map, often leading to isolated noisy pixels or sharp, unnatural transitions (artifacts) between regions from different source images. Can be slightly faster.
 
 **Good Starting Point:**
 
