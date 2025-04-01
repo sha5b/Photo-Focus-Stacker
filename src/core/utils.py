@@ -114,11 +114,15 @@ def split_into_stacks(image_paths, stack_size=0):
                     base_name = groups[1].strip() if groups[1] else "default_stack"
                     # seq_num = int(groups[0])
                 else: # Fallback
-                     base_name = "default_stack"
+                     base_name = "default_stack" # Should ideally not be reached with current patterns
 
-                # Normalize base name (remove trailing numbers/separators if pattern was too greedy)
-                base_name = re.sub(r'[\s_-]*\d*$', '', base_name).strip()
-                if not base_name: base_name = "default_stack"
+                # Base name is directly from the captured group, already stripped.
+                # The normalization below was causing issues with names like 'alienshape_0_1'
+                # base_name = re.sub(r'[\s_-]*\d*$', '', base_name).strip()
+                # if not base_name: base_name = "default_stack"
+
+                if not base_name: # Handle cases where regex might capture empty string
+                    base_name = "default_stack"
 
                 if base_name not in stacks_dict:
                     stacks_dict[base_name] = []
