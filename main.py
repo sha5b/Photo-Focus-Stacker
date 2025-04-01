@@ -74,7 +74,8 @@ class MainWindow(QMainWindow):
             'focus_window_size': 7,
             'sharpen_strength': 0.0,
             'num_pyramid_levels': 3, # Default pyramid levels
-            'gradient_threshold': 10 # Default gradient threshold for ECC mask
+            'gradient_threshold': 10, # Default gradient threshold for ECC mask
+            'blend_method': 'weighted' # Add default blend method
         }
 
         self.init_ui()
@@ -131,6 +132,19 @@ class MainWindow(QMainWindow):
         params_layout.addWidget(self.sharpen_label, row, 0)
         params_layout.addWidget(self.sharpen_spinbox, row, 1)
         row += 1
+
+        # --- Blending Method ---
+        self.blend_label = QLabel('Blending Method:')
+        self.blend_combo = QComboBox()
+        self.blend_combo.addItems(['Weighted Blending', 'Direct Map Selection'])
+        # Set initial value based on config
+        default_blend = self.stacker_config.get('blend_method', 'weighted')
+        self.blend_combo.setCurrentIndex(1 if default_blend == 'direct_map' else 0)
+        self.blend_combo.currentIndexChanged.connect(self.update_stacker_config)
+        params_layout.addWidget(self.blend_label, row, 0)
+        params_layout.addWidget(self.blend_combo, row, 1)
+        row += 1
+
 
         # Add stretch to push controls to the top
         params_layout.setRowStretch(row, 1)
@@ -225,6 +239,10 @@ class MainWindow(QMainWindow):
         self.stacker_config['gradient_threshold'] = self.gradient_spinbox.value() # Add gradient threshold
         self.stacker_config['focus_window_size'] = self.focus_window_spinbox.value()
         self.stacker_config['sharpen_strength'] = self.sharpen_spinbox.value()
+        # Update blend method from combo box
+        selected_blend_text = self.blend_combo.currentText()
+        self.stacker_config['blend_method'] = 'direct_map' if selected_blend_text == 'Direct Map Selection' else 'weighted'
+
 
         print("\nStacker configuration updated:")
         for key, value in self.stacker_config.items():

@@ -108,5 +108,53 @@ def blend_weighted(aligned_images, focus_maps):
     print("Weighted blending complete.")
     return result
 
+# --- Direct Map Blending ---
+
+def blend_direct_map(aligned_images, sharpest_indices):
+    """
+    Blend aligned images by directly selecting pixels based on the sharpest index map.
+
+    @param aligned_images: List of aligned input images (float32 [0, 1]).
+    @param sharpest_indices: 2D NumPy array (uint16) indicating the index of the
+                             sharpest image for each pixel.
+    @return: Blended image (float32 [0, 1]).
+    """
+    print("\nBlending images using direct map selection...")
+    if not aligned_images or sharpest_indices is None:
+        raise ValueError("Invalid input: aligned_images and sharpest_indices must be provided.")
+    if len(aligned_images) == 0:
+         raise ValueError("aligned_images list cannot be empty.")
+
+    h, w = aligned_images[0].shape[:2]
+    num_images = len(aligned_images)
+
+    if sharpest_indices.shape != (h, w):
+        raise ValueError(f"Shape mismatch: sharpest_indices {sharpest_indices.shape} vs expected {(h, w)}")
+
+    # Create the output image (ensure float32)
+    result = np.zeros((h, w, 3), dtype=np.float32)
+
+    # Stack images into a single NumPy array for easier indexing (N, H, W, C)
+    # Ensure all images have the same shape before stacking
+    for i, img in enumerate(aligned_images):
+        if img.shape[:2] != (h, w):
+            raise ValueError(f"Image {i} has shape {img.shape[:2]}, expected {(h, w)}")
+    image_stack = np.stack(aligned_images, axis=0)
+
+    # Use advanced indexing to select pixels
+    # Create meshgrid for H and W dimensions
+    row_indices, col_indices = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
+
+    # Select pixels: image_stack[sharpest_indices, row_indices, col_indices]
+    # This selects the pixel from the correct image (indexed by sharpest_indices)
+    # at each (row, col) coordinate.
+    result = image_stack[sharpest_indices, row_indices, col_indices]
+
+    # Ensure the result is float32 and clipped (though direct selection shouldn't go out of bounds)
+    result = np.clip(result.astype(np.float32), 0.0, 1.0)
+
+    print("Direct map blending complete.")
+    return result
+
 # Removed Laplacian blending and consistency filter functions
 # Removed blend_direct_select as weighted is now the only option
