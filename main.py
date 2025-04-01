@@ -72,8 +72,9 @@ class MainWindow(QMainWindow):
             'blend_method': 'weighted',
             'consistency_filter': False,
             'consistency_kernel': 5,
-            'postprocess': True,
-            'laplacian_levels': 5
+            # 'postprocess': True, # REMOVED postprocess from default config
+            'laplacian_levels': 5,
+            'ecc_motion_type': 'AFFINE' # Add default ECC motion type
         }
 
         # Create initial stacker instance (will be updated by UI)
@@ -85,27 +86,67 @@ class MainWindow(QMainWindow):
         """Creates the QGroupBox for stacking parameters."""
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
+        params_layout.setVerticalSpacing(10)   # Add vertical spacing between rows
+        params_layout.setHorizontalSpacing(15) # Add horizontal spacing between columns
+        # Give more horizontal space to the controls (column 1) than the labels (column 0)
+        params_layout.setColumnStretch(0, 1) # Label column stretch factor
+        params_layout.setColumnStretch(1, 3) # Control column stretch factor
         row = 0
 
         # --- Alignment Method ---
         align_label = QLabel('Alignment:')
         self.align_combo = QComboBox()
-        self.align_combo.addItems(['orb', 'ecc']) # Add more as implemented
+        self.align_combo.addItems(['orb', 'ecc', 'akaze']) # Add AKAZE option
         self.align_combo.setCurrentText(self.stacker_config['align_method'])
         self.align_combo.currentTextChanged.connect(self.update_stacker_config)
+        # Connect align_combo change to toggle ECC options visibility
+        self.align_combo.currentTextChanged.connect(self.toggle_ecc_options_visibility)
         params_layout.addWidget(align_label, row, 0)
         params_layout.addWidget(self.align_combo, row, 1)
         row += 1
 
+        # --- ECC Motion Type (Conditional) ---
+        self.ecc_motion_label = QLabel('ECC Motion Type:')
+        self.ecc_motion_combo = QComboBox()
+        self.ecc_motion_combo.addItems(['AFFINE', 'HOMOGRAPHY', 'TRANSLATION']) # Add more if needed
+        self.ecc_motion_combo.setCurrentText(self.stacker_config['ecc_motion_type'])
+        self.ecc_motion_combo.currentTextChanged.connect(self.update_stacker_config)
+        params_layout.addWidget(self.ecc_motion_label, row, 0)
+        params_layout.addWidget(self.ecc_motion_combo, row, 1)
+        # Show/hide based on alignment method selection
+        self.toggle_ecc_options_visibility() # Set initial visibility
+        row += 1
+
+
         # --- Focus Measure Method ---
         focus_label = QLabel('Focus Measure:')
         self.focus_combo = QComboBox()
-        self.focus_combo.addItems(['custom', 'laplacian_variance']) # Add more as implemented
+        # Add the new map method
+        self.focus_combo.addItems(['custom', 'laplacian_variance', 'laplacian_variance_map'])
         self.focus_combo.setCurrentText(self.stacker_config['focus_measure_method'])
         self.focus_combo.currentTextChanged.connect(self.update_stacker_config)
         params_layout.addWidget(focus_label, row, 0)
         params_layout.addWidget(self.focus_combo, row, 1)
         row += 1
+
+        # --- Focus Window Size (Conditional) ---
+        self.focus_window_label = QLabel('Focus Window Size:')
+        self.focus_window_spinbox = QSpinBox()
+        self.focus_window_spinbox.setRange(3, 21) # Odd numbers usually
+        self.focus_window_spinbox.setSingleStep(2)
+        # Retrieve default from config if exists, else use 9
+        default_focus_window = self.stacker_config.get('focus_window_size', 9)
+        self.focus_window_spinbox.setValue(default_focus_window)
+        self.focus_window_spinbox.valueChanged.connect(self.update_stacker_config)
+        params_layout.addWidget(self.focus_window_label, row, 0)
+        params_layout.addWidget(self.focus_window_spinbox, row, 1)
+        # Show/hide based on focus measure method selection
+        self.focus_window_label.setVisible(self.stacker_config['focus_measure_method'] == 'laplacian_variance_map')
+        self.focus_window_spinbox.setVisible(self.stacker_config['focus_measure_method'] == 'laplacian_variance_map')
+        self.focus_combo.currentTextChanged.connect(lambda text: self.focus_window_label.setVisible(text == 'laplacian_variance_map'))
+        self.focus_combo.currentTextChanged.connect(lambda text: self.focus_window_spinbox.setVisible(text == 'laplacian_variance_map'))
+        row += 1
+
 
         # --- Blending Method ---
         blend_label = QLabel('Blending:')
@@ -154,16 +195,22 @@ class MainWindow(QMainWindow):
         self.blend_combo.currentTextChanged.connect(self.toggle_consistency_kernel_visibility)
         row += 1
 
-        # --- Post-processing ---
-        self.postprocess_checkbox = QCheckBox('Apply Post-processing (Contrast/Sharpen)')
-        self.postprocess_checkbox.setChecked(self.stacker_config['postprocess'])
-        self.postprocess_checkbox.stateChanged.connect(self.update_stacker_config)
-        params_layout.addWidget(self.postprocess_checkbox, row, 0, 1, 2) # Span checkbox
-        row += 1
+        # --- Post-processing --- REMOVED
+        # self.postprocess_checkbox = QCheckBox('Apply Post-processing (Contrast/Sharpen)')
+        # self.postprocess_checkbox.setChecked(self.stacker_config['postprocess'])
+        # self.postprocess_checkbox.stateChanged.connect(self.update_stacker_config)
+        # params_layout.addWidget(self.postprocess_checkbox, row, 0, 1, 2) # Span checkbox
+        # row += 1
 
 
         params_group.setLayout(params_layout)
         return params_group
+
+    def toggle_ecc_options_visibility(self):
+        """Shows/hides the ECC motion type dropdown based on alignment selection."""
+        show = (self.align_combo.currentText() == 'ecc')
+        self.ecc_motion_label.setVisible(show)
+        self.ecc_motion_combo.setVisible(show)
 
     def toggle_consistency_kernel_visibility(self):
         """Shows/hides the consistency kernel size controls based on checkbox and blend method."""
@@ -219,7 +266,8 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Focus Stacking Tool')
-        self.setMinimumSize(600, 400)
+        # Increase minimum height further
+        self.setMinimumSize(600, 600)
 
         # Central Widget and Main Layout
         central_widget = QWidget()
@@ -255,7 +303,11 @@ class MainWindow(QMainWindow):
         self.stacker_config['laplacian_levels'] = self.laplacian_spinbox.value()
         self.stacker_config['consistency_filter'] = self.consistency_checkbox.isChecked()
         self.stacker_config['consistency_kernel'] = self.consistency_kernel_spinbox.value()
-        self.stacker_config['postprocess'] = self.postprocess_checkbox.isChecked()
+        # self.stacker_config['postprocess'] = self.postprocess_checkbox.isChecked() # REMOVED
+        self.stacker_config['focus_window_size'] = self.focus_window_spinbox.value()
+        # Add ECC motion type to config update
+        self.stacker_config['ecc_motion_type'] = self.ecc_motion_combo.currentText()
+
 
         # Optional: Could re-instantiate self.stacker here if needed immediately,
         # but it's safer to create it fresh in the processing thread.

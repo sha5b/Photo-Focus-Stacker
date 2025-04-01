@@ -33,19 +33,16 @@ def measure_custom(img, radius=8):
     Operates on a color image (float32 [0, 1]).
 
     @param img: Input color image (float32 NumPy array [0, 1]).
-    @param radius: Parameter influencing window sizes (indirectly via internal logic).
-                   Original class used this, kept for potential future use, but current
-                   implementation uses fixed kernel sizes. Consider removing or integrating.
+    @param radius: (Currently unused) Parameter potentially influencing window sizes.
     @return: Focus map (float32 NumPy array [0, 1]), same HxW as input.
     """
-    print(f"Calculating custom focus measure...") # Add print statement
+    print(f"Calculating custom focus measure...")
     if len(img.shape) == 3:
         try:
             img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
         except cv2.error as e:
             print(f"Error converting image to grayscale in focus measure: {e}")
-            # Return a zero map or raise error? Returning zero map for now.
-            return np.zeros(img.shape[:2], dtype=np.float32)
+            return np.zeros(img.shape[:2], dtype=np.float32) # Return zero map on error
     elif img.dtype == np.uint8: # Handle uint8 grayscale input
          img_gray = img.astype(np.float32) / 255.0
     elif img.dtype == np.float32: # Handle float32 grayscale input
@@ -89,11 +86,8 @@ def measure_custom(img, radius=8):
         local_mean = cv2.GaussianBlur(scaled_img, (ksize_contrast, ksize_contrast), sigma_contrast)
         local_contrast = np.abs(scaled_img - local_mean)
 
-        # Combine components - ensure non-negative before potential sqrt/log
-        # Using multiplication can lead to very small numbers, maybe addition is more stable?
-        # Let's stick to multiplication for now as per original logic.
-        # Add small epsilon to avoid issues with zero values if taking log later.
-        epsilon = 1e-6
+        # Combine components using multiplication
+        epsilon = 1e-6 # Add small epsilon for numerical stability
         scale_measure = (high_freq + epsilon) * (edge_strength + epsilon) * (local_contrast + epsilon) * (scaled_grad + epsilon)
 
         # Resize result back to original size if needed
@@ -128,6 +122,48 @@ def measure_custom(img, radius=8):
 
     print("Custom focus measure calculation complete.")
     return focus_map.astype(np.float32)
+
+
+def measure_laplacian_variance_map(img_gray, window_size=9):
+    """
+    Calculates a focus measure map using the variance of the Laplacian within a local window.
+
+    @param img_gray: Grayscale input image (float32 [0, 1] or uint8 [0, 255]).
+    @param window_size: Size of the square window for variance calculation (must be odd).
+    @return: Focus map (float32 NumPy array [0, 1]), same HxW as input.
+    """
+    print(f"Calculating Laplacian variance map (window={window_size})...")
+    if img_gray.dtype != np.uint8:
+        img_gray_uint8 = (img_gray * 255).astype(np.uint8)
+    else:
+        img_gray_uint8 = img_gray
+
+    # Ensure window size is odd
+    window_size = window_size if window_size % 2 != 0 else window_size + 1
+
+    # Calculate Laplacian (use CV_64F for potentially negative values)
+    laplacian = cv2.Laplacian(img_gray_uint8, cv2.CV_64F, ksize=3) # ksize=3 is common for focus maps
+
+    # Calculate local mean of Laplacian using a box filter (efficient)
+    mean = cv2.boxFilter(laplacian, -1, (window_size, window_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+
+    # Calculate local mean of squared Laplacian
+    laplacian_sq = laplacian**2
+    mean_sq = cv2.boxFilter(laplacian_sq, -1, (window_size, window_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+
+    # Calculate local variance: variance = E[X^2] - (E[X])^2
+    variance_map = mean_sq - mean**2
+
+    # Normalize the variance map to [0, 1]
+    min_val, max_val, _, _ = cv2.minMaxLoc(variance_map)
+    if max_val > min_val:
+        focus_map = (variance_map - min_val) / (max_val - min_val)
+    else:
+        focus_map = np.zeros_like(variance_map) # Avoid division by zero
+
+    print("Laplacian variance map calculation complete.")
+    return focus_map.astype(np.float32)
+
 
 # --- Add other focus measure functions here ---
 # e.g., measure_sobel_variance, measure_fft_based, etc.

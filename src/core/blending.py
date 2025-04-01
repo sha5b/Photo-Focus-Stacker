@@ -114,7 +114,7 @@ def blend_weighted(aligned_images, focus_maps):
 def _build_gaussian_pyramid(img, levels):
     """Builds a Gaussian pyramid."""
     pyramid = [img]
-    for _ in range(levels - 1):
+    for i in range(levels - 1):
         img = cv2.pyrDown(img)
         pyramid.append(img)
     return pyramid
@@ -123,19 +123,25 @@ def _build_laplacian_pyramid(img, levels):
     """Builds a Laplacian pyramid."""
     gaussian_pyramid = _build_gaussian_pyramid(img, levels)
     laplacian_pyramid = []
-    for i in range(levels - 1):
+    # Ensure levels doesn't exceed actual pyramid size possible
+    actual_levels = min(levels, len(gaussian_pyramid))
+    if actual_levels != levels:
+        print(f"      Warning: Requested {levels} levels, but image size only allows {actual_levels}.")
+
+    for i in range(actual_levels - 1): # Use actual_levels
         expanded = cv2.pyrUp(gaussian_pyramid[i+1], dstsize=(gaussian_pyramid[i].shape[1], gaussian_pyramid[i].shape[0]))
         laplacian = cv2.subtract(gaussian_pyramid[i], expanded)
         laplacian_pyramid.append(laplacian)
-    laplacian_pyramid.append(gaussian_pyramid[levels-1]) # Top level is the same as Gaussian
+    laplacian_pyramid.append(gaussian_pyramid[actual_levels-1]) # Use actual_levels for top level
     return laplacian_pyramid
 
 def _reconstruct_from_laplacian_pyramid(pyramid):
     """Reconstructs an image from its Laplacian pyramid."""
     if not pyramid:
         return None # Or raise error
+    num_levels = len(pyramid)
     img = pyramid[-1] # Start with the top level
-    for i in range(len(pyramid) - 2, -1, -1): # Iterate downwards
+    for i in range(num_levels - 2, -1, -1): # Iterate downwards
         expanded = cv2.pyrUp(img, dstsize=(pyramid[i].shape[1], pyramid[i].shape[0]))
         img = cv2.add(expanded, pyramid[i])
     return img
@@ -187,11 +193,7 @@ def blend_laplacian_pyramid(aligned_images, sharpest_indices_map, levels=5):
         level_indices = np.round(index_pyramid[level]).astype(int) # Round indices at this level
         level_indices = np.clip(level_indices, 0, num_images - 1) # Ensure indices are valid
 
-        # Select coefficients directly based on the index map at this level
-        # This requires iterating through pixels or using advanced indexing.
-        # A simpler approach (often used) is region-based: create masks from the index map.
-        # Let's try the region-based approach first.
-
+        # Select coefficients directly based on the index map at this level using masks.
         h_level, w_level = laplacian_pyramids[0][level].shape[:2]
         num_channels = laplacian_pyramids[0][level].shape[2] if len(laplacian_pyramids[0][level].shape) == 3 else 1
 
@@ -217,7 +219,7 @@ def blend_laplacian_pyramid(aligned_images, sharpest_indices_map, levels=5):
     return result.astype(np.float32)
 
 
-# --- Consistency Filter (Placeholder) ---
+# --- Consistency Filter ---
 
 def apply_consistency_filter(index_map, kernel_size=5):
     """
@@ -233,18 +235,15 @@ def apply_consistency_filter(index_map, kernel_size=5):
         kernel_size += 1 # Ensure odd kernel size
         print(f"  Adjusted kernel size to {kernel_size} (must be odd).")
 
-    # Median filter is good for removing salt-and-pepper noise, which is similar
-    # to isolated incorrect index assignments.
-    # Ensure input is suitable type for medianBlur (e.g., uint8)
+    # Median filter is good for removing salt-and-pepper noise from the index map.
+    # Ensure input is suitable type for medianBlur.
     if np.max(index_map) < 256:
          filtered_map = cv2.medianBlur(index_map.astype(np.uint8), kernel_size)
     else:
-         # Handle cases with more than 256 images? Maybe mode filter?
-         # For now, just convert to float32 and use medianBlur, might be slow
-         print("  Warning: More than 255 images, median filter might be slow or less effective.")
+         # Handle cases with more than 256 images (medianBlur might be slow on float32)
+         print("  Warning: More than 255 images, median filter might be slow.")
          filtered_map = cv2.medianBlur(index_map.astype(np.float32), kernel_size)
-         # Convert back to original dtype if needed, though indices should remain integer-like
-         filtered_map = np.round(filtered_map).astype(index_map.dtype)
+         filtered_map = np.round(filtered_map).astype(index_map.dtype) # Convert back
 
     print("Consistency filter applied.")
     return filtered_map

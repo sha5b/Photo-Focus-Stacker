@@ -21,12 +21,26 @@ python src/main.py
 
 2. **Load Images:** Click "Load Images" and select the image files for your focus stack. Images should ideally be named sequentially (e.g., `img_001.jpg`, `img_002.jpg`). The tool will attempt to automatically group them into stacks.
 3. **Configure Parameters:** Adjust the stacking parameters in the UI as needed:
-    *   **Alignment:** Choose the image alignment method (e.g., 'orb').
-    *   **Focus Measure:** Select how image sharpness is determined (e.g., 'custom').
-    *   **Blending:** Choose the method for combining images (e.g., 'weighted', 'laplacian').
-    *   **Laplacian Levels:** (Only for 'laplacian' blending) Number of pyramid levels.
-    *   **Consistency Filter:** (Only for 'laplacian' blending) Check to apply a median filter to reduce noise in the selection map. Adjust kernel size if needed.
-    *   **Post-processing:** Check to apply contrast adjustment and sharpening.
+    *   **Alignment:** Method used to align images before stacking.
+        *   `orb`: Faster, feature-based alignment using ORB features and homography. Good default. (Uses Cross-Check matching).
+        *   `ecc`: Slower, potentially more accurate pixel-based alignment (Enhanced Correlation Coefficient). Can handle subtle warps better. Choose Motion Type below.
+        *   `akaze`: Feature-based alignment similar to ORB, but uses AKAZE features which can be more robust to scale and rotation changes.
+    *   **ECC Motion Type:** (Only for `ecc` alignment) The mathematical model ECC uses to describe the transformation between images. Choose based on expected camera/subject movement:
+        *   `TRANSLATION`: Assumes movement is only horizontal (X) and vertical (Y) shifts. Fastest, but only suitable if there's no rotation, scaling, or perspective change.
+        *   `AFFINE`: Handles translation, rotation, scaling, and shear (skewing). A good general-purpose choice for many scenarios where perspective distortion is minimal. (6 degrees of freedom).
+        *   `HOMOGRAPHY` (Perspective): Handles full perspective transformations, including changes in viewpoint. Most flexible but also most complex and potentially less stable if the movement is actually simpler (e.g., purely affine). Use if you see perspective distortions not corrected by AFFINE. (8 degrees of freedom).
+    *   **Focus Measure:** Algorithm to determine the sharpest pixels in each image.
+        *   `custom`: An experimental multi-faceted approach.
+        *   `laplacian_variance`: Older method, uses absolute Laplacian as a basic sharpness map.
+        *   `laplacian_variance_map`: Calculates sharpness based on the variance of the Laplacian within a local window. Generally recommended.
+    *   **Focus Window Size:** (Only for `laplacian_variance_map`) Size of the square window (pixels) used to calculate local sharpness variance. Smaller values (e.g., 7) capture finer detail but can be noisier. Larger values (e.g., 11, 15) give smoother maps but might blur focus boundaries. Default: 9.
+    *   **Blending:** Method for combining the sharpest parts from aligned images.
+        *   `weighted`: Simple and fast blending based directly on focus map values. Good default.
+        *   `laplacian`: More complex pyramid-based blending, can produce smoother transitions but is slower. Often used with the Consistency Filter.
+    *   **Laplacian Levels:** (Only for `laplacian` blending) Number of pyramid levels used for blending. More levels capture finer details but increase processing time. Default: 5.
+    *   **Apply Consistency Filter:** (Recommended for `laplacian` blending) Applies a median filter to the internal map that decides which source image is sharpest at each pixel. Reduces noise and small inconsistent regions.
+    *   **Filter Kernel Size:** (Only if Consistency Filter is checked) Size of the median filter kernel (must be odd). Larger values increase smoothing. Default: 5.
+    *   ~~**Apply Post-processing:**~~ (This option has been removed).
 4. **Output Settings:** Optionally set a base name for the output files.
 5. **Process:** Click "Process Stack". The results will be saved in the `results/` directory.
 
@@ -48,18 +62,43 @@ This tool requires Python 3 (3.8 or higher recommended) and several Python packa
     cd Photo-Focus-Stacker
     ```
 
-2.  **Create a Virtual Environment:** (Recommended)
-    ```bash
-    # Windows
-    python -m venv venv
-    venv\Scripts\activate
+2.  **Create and Activate a Virtual Environment:** (Highly Recommended)
 
-    # macOS / Linux
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
+    Using a virtual environment isolates the project's dependencies from your global Python installation, preventing conflicts between projects.
+
+    *   **Windows (Command Prompt - cmd.exe):**
+        ```bash
+        # Create the virtual environment (replace 'python' with 'py -3' or specific python path if needed)
+        python -m venv venv
+        # Activate the virtual environment
+        venv\Scripts\activate.bat
+        # Your prompt should now show (venv) at the beginning
+        ```
+
+    *   **Windows (PowerShell):**
+        ```powershell
+        # Create the virtual environment (replace 'python' with 'py -3' or specific python path if needed)
+        python -m venv venv
+        # Activate the virtual environment (you might need to adjust execution policy)
+        # Run: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+        venv\Scripts\Activate.ps1
+        # Your prompt should now show (venv) at the beginning
+        ```
+
+    *   **macOS / Linux (Bash/Zsh):**
+        ```bash
+        # Create the virtual environment (use python3)
+        python3 -m venv venv
+        # Activate the virtual environment
+        source venv/bin/activate
+        # Your prompt should now show (venv) at the beginning
+        ```
+
+    *   **Deactivating:** When you're finished working on the project, simply type `deactivate` in the terminal.
 
 3.  **Install Requirements:**
+
+    *Ensure your virtual environment is activated before running this command.*
     ```bash
     pip install -r requirements.txt
     ```
@@ -133,17 +172,30 @@ else:
 
 ```
 
-### `FocusStacker` Options
+### `FocusStacker` Options (Python API)
 
-When initializing `FocusStacker`, you can customize its behavior:
+When initializing `FocusStacker` in your Python code, you can customize its behavior:
 
-*   `align_method` (str, default='orb'): Method for aligning images. Options: 'orb'. ('ecc' is a placeholder).
-*   `focus_measure_method` (str, default='custom'): Method for measuring focus. Options: 'custom', 'laplacian_variance' (uses absolute Laplacian map).
-*   `blend_method` (str, default='weighted'): Method for blending images. Options: 'weighted', 'laplacian'.
-*   `consistency_filter` (bool, default=False): Apply median filter to the sharpness map before Laplacian blending. Helps reduce noise.
-*   `consistency_kernel` (int, default=5): Kernel size for the consistency filter (must be odd).
-*   `postprocess` (bool, default=True): Apply contrast/brightness adjustment and sharpening after blending.
-*   `laplacian_levels` (int, default=5): Number of pyramid levels used in Laplacian blending.
+*   `align_method` (str, default='orb'): Method for aligning images.
+    *   `'orb'`: Feature-based alignment (ORB features, homography). Uses KNN + Ratio Test matching.
+    *   `'ecc'`: Pixel-based alignment (Enhanced Correlation Coefficient).
+    *   `'akaze'`: Feature-based alignment (AKAZE features, homography). Uses KNN + Ratio Test matching.
+*   `ecc_motion_type` (str, default='AFFINE'): Motion model used only if `align_method='ecc'`. Defines the type of transformation ECC estimates.
+    *   `'TRANSLATION'`: Models only X/Y shifts.
+    *   `'AFFINE'`: Models translation, rotation, scale, shear.
+    *   `'HOMOGRAPHY'`: Models perspective transformations.
+*   `focus_measure_method` (str, default='custom'): Method for measuring focus.
+    *   `'custom'`: Experimental multi-faceted approach.
+    *   `'laplacian_variance'`: Older method using absolute Laplacian map.
+    *   `'laplacian_variance_map'`: Recommended method using local variance of Laplacian.
+*   `focus_window_size` (int, default=9): Window size for the `'laplacian_variance_map'` method. Must be odd.
+*   `blend_method` (str, default='weighted'): Method for blending images.
+    *   `'weighted'`: Simple blending based on focus map weights.
+    *   `'laplacian'`: Pyramid-based blending for smoother transitions.
+*   `consistency_filter` (bool, default=False): Apply median filter to the internal sharpness selection map before Laplacian blending. Helps reduce noise. Recommended if `blend_method='laplacian'`.
+*   `consistency_kernel` (int, default=5): Kernel size for the consistency filter (must be odd). Used only if `consistency_filter=True`.
+*   ~~`postprocess` (bool, default=True):~~ This parameter has been removed.
+*   `laplacian_levels` (int, default=5): Number of pyramid levels used in Laplacian blending. Used only if `blend_method='laplacian'`.
 
 ## Contributing
 

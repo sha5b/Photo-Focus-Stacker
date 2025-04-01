@@ -31,7 +31,6 @@ def align_orb(images):
         return images # Return original images if conversion fails
 
     # Initialize ORB detector
-    # Increased features, adjusted parameters for potentially better matching
     try:
         orb = cv2.ORB_create(nfeatures=2000, scaleFactor=1.2, nlevels=8, edgeThreshold=15, patchSize=31)
     except cv2.error as e:
@@ -53,7 +52,7 @@ def align_orb(images):
 
     # Initialize Brute-Force Matcher
     try:
-        # Use crossCheck=False for ratio test
+        # Use crossCheck=False for KNN matching + ratio test
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     except cv2.error as e:
         print(f"Error creating BFMatcher: {e}. Check OpenCV installation.")
@@ -77,21 +76,18 @@ def align_orb(images):
                 continue
 
             # Match descriptors using KNN
-            matches = bf.knnMatch(des_ref, des_img, k=2)
+            matches_knn = bf.knnMatch(des_ref, des_img, k=2)
 
             # Apply Lowe's ratio test to filter good matches
             good_matches = []
-            if matches and len(matches[0]) == 2: # Ensure knnMatch returned pairs
-                 for m, n in matches:
-                    # Check if descriptors are valid before accessing distance
-                    if m is not None and n is not None and hasattr(m, 'distance') and hasattr(n, 'distance'):
-                        if m.distance < 0.75 * n.distance: # Ratio test
-                            good_matches.append(m)
-            else:
-                print(f"Warning: KNN matching did not return expected pairs for image {i+1}.")
+            ratio_thresh = 0.75 # Standard threshold
+            for m, n in matches_knn:
+                # Ensure m and n are valid matches (knnMatch can return fewer than k)
+                if m is not None and n is not None and hasattr(m, 'distance') and hasattr(n, 'distance'):
+                    if m.distance < ratio_thresh * n.distance:
+                        good_matches.append(m)
 
-
-            print(f"Found {len(good_matches)} good matches for image {i+1}.")
+            print(f"Found {len(good_matches)} good matches (ratio={ratio_thresh}) for image {i+1}.")
 
             # Need at least min_match_count good matches to find homography reliably
             min_match_count = 10 # Minimum match count for robustness
@@ -100,12 +96,11 @@ def align_orb(images):
                 # Ensure indices are valid before accessing keypoints
                 src_pts_list = []
                 dst_pts_list = []
+                # Use the filtered good_matches list
                 for m in good_matches:
                     if m.queryIdx < len(kp_ref) and m.trainIdx < len(kp_img):
                          src_pts_list.append(kp_ref[m.queryIdx].pt)
                          dst_pts_list.append(kp_img[m.trainIdx].pt)
-                    else:
-                        print(f"Warning: Invalid match index encountered for image {i+1}. Skipping match.")
 
                 if len(src_pts_list) < min_match_count:
                     print(f"Warning: Not enough valid matches ({len(src_pts_list)}/{min_match_count}) after index check for image {i+1}. Using original image.")
@@ -146,14 +141,13 @@ def align_orb(images):
     return aligned
 
 # --- ECC Alignment ---
-def align_ecc(images, motion_type=cv2.MOTION_AFFINE, max_iterations=100, epsilon=1e-5):
+def align_ecc(images, motion_type_str='AFFINE', max_iterations=100, epsilon=1e-5):
     """
     Align images using ECC (Enhanced Correlation Coefficient).
     Aligns all images to the first image in the list.
 
     @param images: List of images (as float32 NumPy arrays [0, 1]) to align.
-    @param motion_type: Type of motion model (e.g., cv2.MOTION_TRANSLATION,
-                        cv2.MOTION_AFFINE, cv2.MOTION_HOMOGRAPHY). Default: AFFINE.
+    @param motion_type_str: String representing the motion model ('AFFINE', 'HOMOGRAPHY', 'TRANSLATION'). Default: 'AFFINE'.
     @param max_iterations: Maximum number of iterations for ECC algorithm.
     @param epsilon: Termination threshold for ECC algorithm.
     @return: List of aligned images (float32 NumPy arrays [0, 1]).
@@ -163,7 +157,19 @@ def align_ecc(images, motion_type=cv2.MOTION_AFFINE, max_iterations=100, epsilon
     if len(images) == 1:
         return images # No alignment needed
 
-    print(f"\nAligning images using ECC (Motion Type: {motion_type})...")
+    # Map string motion type to OpenCV constant
+    motion_map = {
+        'AFFINE': cv2.MOTION_AFFINE,
+        'HOMOGRAPHY': cv2.MOTION_HOMOGRAPHY,
+        'TRANSLATION': cv2.MOTION_TRANSLATION
+    }
+    motion_type = motion_map.get(motion_type_str.upper())
+    if motion_type is None:
+        print(f"Warning: Invalid ECC motion type string '{motion_type_str}'. Defaulting to AFFINE.")
+        motion_type = cv2.MOTION_AFFINE
+        motion_type_str = 'AFFINE' # Update string for print message
+
+    print(f"\nAligning images using ECC (Motion Type: {motion_type_str})...")
     reference = images[0]
     aligned = [reference] # Start with the reference image
 
@@ -194,11 +200,9 @@ def align_ecc(images, motion_type=cv2.MOTION_AFFINE, max_iterations=100, epsilon
                 warp_matrix = np.eye(2, 3, dtype=np.float32)
 
             # Run ECC algorithm to find the transformation
-            # Handle potential exceptions during findTransformECC
             try:
                 (cc, warp_matrix_found) = cv2.findTransformECC(ref_gray, img_gray, warp_matrix, motion_type, criteria)
-                # Use the found matrix if ECC converged successfully (cc is correlation coefficient)
-                # A threshold could be added here, e.g., if cc < 0.8: raise cv2.error("Low correlation")
+                # Use the found matrix if ECC converged successfully
                 warp_matrix = warp_matrix_found
                 print(f"  ECC finished for image {i+1}. Correlation: {cc:.4f}")
             except cv2.error as ecc_error:
@@ -228,4 +232,137 @@ def align_ecc(images, motion_type=cv2.MOTION_AFFINE, max_iterations=100, epsilon
             aligned.append(img)
 
     print(f"ECC Alignment complete. Returning {len(aligned)} images.")
+    return aligned
+
+
+# --- AKAZE Alignment ---
+def align_akaze(images):
+    """
+    Align images using AKAZE feature matching and Homography.
+    Aligns all images to the first image in the list.
+
+    @param images: List of images (as float32 NumPy arrays [0, 1]) to align.
+    @return: List of aligned images (float32 NumPy arrays [0, 1]).
+    """
+    if not images:
+        return []
+    if len(images) == 1:
+        return images # No alignment needed
+
+    print("\nAligning images using AKAZE features...")
+    reference = images[0]
+    aligned = [reference] # Start with the reference image
+
+    # Convert reference image to grayscale uint8 for feature detection
+    try:
+        ref_gray = cv2.cvtColor((reference * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        h, w = ref_gray.shape
+    except cv2.error as e:
+        print(f"Error converting reference image to grayscale: {e}")
+        print("Cannot proceed with alignment.")
+        return images # Return original images if conversion fails
+
+    # Initialize AKAZE detector
+    try:
+        akaze = cv2.AKAZE_create()
+    except cv2.error as e:
+        print(f"Error creating AKAZE detector: {e}. Check OpenCV installation.")
+        print("Cannot proceed with alignment.")
+        return images
+
+    # Find keypoints and descriptors in the reference image
+    try:
+        kp_ref, des_ref = akaze.detectAndCompute(ref_gray, None)
+        if des_ref is None or len(kp_ref) == 0:
+            print("Warning: No descriptors found in reference image. Skipping alignment for subsequent images.")
+            return images
+    except cv2.error as e:
+        print(f"Error detecting features in reference image: {e}")
+        print("Cannot proceed with alignment.")
+        return images
+
+    # Initialize Brute-Force Matcher (NORM_HAMMING for binary descriptors like AKAZE)
+    try:
+        # Use crossCheck=False for KNN matching + ratio test
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    except cv2.error as e:
+        print(f"Error creating BFMatcher: {e}. Check OpenCV installation.")
+        print("Cannot proceed with alignment.")
+        return images
+
+    # Align subsequent images to the reference
+    for i, img in enumerate(images[1:], 1):
+        print(f"Aligning image {i+1}/{len(images)}...")
+
+        try:
+            # Convert current image to grayscale uint8
+            img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+
+            # Find keypoints and descriptors in the current image
+            kp_img, des_img = akaze.detectAndCompute(img_gray, None)
+
+            if des_img is None or len(kp_img) < 4:
+                print(f"Warning: Not enough descriptors found in image {i+1}. Using original image.")
+                aligned.append(img)
+                continue
+
+            # Match descriptors using KNN
+            matches_knn = bf.knnMatch(des_ref, des_img, k=2)
+
+            # Apply Lowe's ratio test
+            good_matches = []
+            ratio_thresh = 0.75 # Standard threshold
+            for m, n in matches_knn:
+                if m is not None and n is not None and hasattr(m, 'distance') and hasattr(n, 'distance'):
+                    if m.distance < ratio_thresh * n.distance:
+                        good_matches.append(m)
+
+            print(f"Found {len(good_matches)} good matches (ratio={ratio_thresh}) for image {i+1}.")
+
+            # Need at least min_match_count good matches
+            min_match_count = 10
+            if len(good_matches) >= min_match_count:
+                # Extract location of good matches
+                src_pts_list = []
+                dst_pts_list = []
+                for m in good_matches:
+                    if m.queryIdx < len(kp_ref) and m.trainIdx < len(kp_img):
+                         src_pts_list.append(kp_ref[m.queryIdx].pt)
+                         dst_pts_list.append(kp_img[m.trainIdx].pt)
+
+                if len(src_pts_list) < min_match_count:
+                    print(f"Warning: Not enough valid matches ({len(src_pts_list)}/{min_match_count}) after index check for image {i+1}. Using original image.")
+                    aligned.append(img)
+                    continue
+
+                src_pts = np.float32(src_pts_list).reshape(-1, 1, 2)
+                dst_pts = np.float32(dst_pts_list).reshape(-1, 1, 2)
+
+                # Find homography matrix using RANSAC
+                M, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+
+                if M is None:
+                     print(f"Warning: Homography calculation failed for image {i+1} (findHomography returned None). Using original image.")
+                     aligned.append(img)
+                     continue
+
+                # Warp the current image
+                aligned_img = cv2.warpPerspective(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                aligned.append(aligned_img)
+                print(f"Aligned image {i+1} using Homography.")
+
+            else:
+                print(f"Warning: Not enough good matches found ({len(good_matches)}/{min_match_count}) for image {i+1}. Using original image.")
+                aligned.append(img)
+
+        except cv2.error as e:
+            print(f"OpenCV Error aligning image {i+1}: {str(e)}")
+            print("Using original image as fallback.")
+            aligned.append(img)
+        except Exception as e:
+            print(f"Unexpected Error aligning image {i+1}: {str(e)}")
+            print("Using original image as fallback.")
+            aligned.append(img)
+
+    print(f"AKAZE Alignment complete. Returning {len(aligned)} images.")
     return aligned
