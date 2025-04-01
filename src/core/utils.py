@@ -79,47 +79,30 @@ def split_into_stacks(image_paths, stack_size=0):
     Assumes filenames contain sequence numbers.
     @param image_paths: List of full paths to images.
     @param stack_size: Expected number of images per stack (0 for auto-detect).
-    @return: A list of lists, where each inner list is a stack of image paths.
+    @return: A list of tuples, where each tuple is (base_name, list_of_paths).
     """
     stacks_dict = {}
-    # Try common patterns to extract base name and sequence number
-    # Prioritize patterns that capture longer base names
-    patterns = [
-        r'^(.*?)[\s_-]?(\d{1,5})$',          # BaseName_### or BaseName ###
-        r'^(.*?)[\s_-]?(\d{1,5})[\s_-]',     # BaseName_###_Suffix
-        r'^(\d{1,5})[\s_-]?(.*?)$',          # ###_BaseName
-    ]
+    # Use a pattern for the format: prefix_stackID-imageID.ext
+    # e.g., alienshape_0_1-0.jpg -> base_name = alienshape_0_1
+    pattern = r'^(.*_\d+)-(\d+)$' # Group 1: base_name (prefix_stackID), Group 2: image_index
 
-    print("\nAttempting to split images into stacks based on filenames...")
+    print(f"\nAttempting to split images into stacks using pattern: '{pattern}'...")
     for path in image_paths:
         filename = os.path.basename(path)
         name, _ = os.path.splitext(filename)
 
-        matched = False
-        for pattern in patterns:
-            match = re.match(pattern, name, re.IGNORECASE) # Ignore case for matching
-            if match:
-                groups = match.groups()
-                # Determine base name and number based on pattern structure
-                if pattern == patterns[0] or pattern == patterns[1]: # BaseName first
-                    base_name = groups[0].strip() if groups[0] else "default_stack"
-                elif pattern == patterns[2]: # Number first
-                    base_name = groups[1].strip() if groups[1] else "default_stack"
-                else: # Fallback
-                     base_name = "default_stack" # Should ideally not be reached with current patterns
+        match = re.match(pattern, name, re.IGNORECASE) # Try matching the specific pattern
 
-                # Base name is directly from the captured group.
+        if match:
+            base_name = match.group(1).strip() # Group 1 is the base name including the stack ID
+            if not base_name:
+                base_name = "default_stack" # Fallback if base name is empty
 
-                if not base_name: # Handle cases where regex might capture empty string
-                    base_name = "default_stack"
-
-                if base_name not in stacks_dict:
-                    stacks_dict[base_name] = []
-                stacks_dict[base_name].append(path)
-                matched = True
-                break # Stop after first successful pattern match
-
-        if not matched:
+            if base_name not in stacks_dict:
+                stacks_dict[base_name] = []
+            stacks_dict[base_name].append(path)
+        else:
+            # Fallback if the specific pattern doesn't match
             print(f"  Warning: Could not determine stack for file: {filename}. Adding to 'default_stack'.")
             if "default_stack" not in stacks_dict: stacks_dict["default_stack"] = []
             stacks_dict["default_stack"].append(path)
@@ -135,32 +118,32 @@ def split_into_stacks(image_paths, stack_size=0):
         for base_name in stacks_dict:
             stacks_dict[base_name].sort() # Basic sort as fallback
 
-    # Convert dictionary to list of lists (stacks)
-    stacks = list(stacks_dict.values())
+    # Convert dictionary to list of tuples: [(base_name, paths), ...]
+    stack_items = list(stacks_dict.items())
 
     # Optional: Check if detected stacks match the expected size
+    # Operate on stack_items now
     if stack_size > 0:
         print(f"Checking if stacks match expected size: {stack_size}")
-        valid_stacks = []
-        for i, stack in enumerate(stacks):
-            base = os.path.basename(stack[0])[:20]+"..." if stack else "N/A"
-            if len(stack) == stack_size:
-                print(f"  Stack {i+1} ({base}): Found {len(stack)} images (Correct size).")
-                valid_stacks.append(stack)
+        valid_stack_items = []
+        for i, (base_name, paths) in enumerate(stack_items):
+            if len(paths) == stack_size:
+                print(f"  Stack '{base_name}': Found {len(paths)} images (Correct size).")
+                valid_stack_items.append((base_name, paths))
             else:
-                print(f"  Warning: Stack {i+1} ({base}): Found {len(stack)} images, expected {stack_size}. Skipping this stack.")
-        stacks = valid_stacks # Keep only stacks with the correct size if stack_size is specified
+                print(f"  Warning: Stack '{base_name}': Found {len(paths)} images, expected {stack_size}. Skipping this stack.")
+        stack_items = valid_stack_items # Keep only stacks with the correct size
 
-    # Sort stacks based on the first image path for consistent order
-    stacks.sort(key=lambda x: x[0] if x else "")
+    # Sort stacks based on the first image path within each stack for consistent order
+    stack_items.sort(key=lambda item: item[1][0] if item[1] else "")
 
     print("\nDetected Stacks:")
-    if not stacks:
+    if not stack_items:
         print("  No valid stacks found.")
-    for i, stack in enumerate(stacks):
-        if stack: print(f"  Stack {i+1}: {len(stack)} images starting with {os.path.basename(stack[0])}")
+    for i, (base_name, paths) in enumerate(stack_items):
+        if paths: print(f"  Stack {i+1} ('{base_name}'): {len(paths)} images starting with {os.path.basename(paths[0])}")
 
-    return stacks
+    return stack_items # Return list of (base_name, paths) tuples
 
 
 # --- Color Space Conversion ---

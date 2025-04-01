@@ -9,11 +9,11 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QPushButton, QLabel, QFileDialog,
                             QComboBox, QProgressBar, QMessageBox, QGroupBox,
                             QGridLayout, QLineEdit, QCheckBox, QSpinBox,
-                            QDoubleSpinBox) # Added QDoubleSpinBox
+                            QDoubleSpinBox) # Keep needed imports
 from PyQt5.QtCore import QThread, pyqtSignal
 
 # Import from the new structure
-from src.core.focus_stacker import FocusStacker
+from src.core.focus_stacker import FocusStacker, StackingCancelledException # Import exception
 from src.core import utils # Import utils for saving/splitting
 
 class FocusStackingThread(QThread):
@@ -32,7 +32,6 @@ class FocusStackingThread(QThread):
         """
         super().__init__()
         # Create a new stacker instance within the thread using the config
-        # This ensures the thread uses the settings from when it was started
         self.stacker = FocusStacker(**stacker_config)
         self.image_paths = image_paths
         self.color_space = color_space
@@ -41,20 +40,24 @@ class FocusStackingThread(QThread):
     def run(self):
         """Process the focus stacking operation"""
         try:
-            # process_stack now uses the stacker instance created in __init__
             result = self.stacker.process_stack(
                 self.image_paths,
                 self.color_space
             )
             if not self.stopped:
                 self.finished.emit(result)
+        except StackingCancelledException:
+            print("Stacking thread caught cancellation.")
+            pass
         except Exception as e:
             if not self.stopped:
                 self.error.emit(str(e))
 
     def stop(self):
-        """Signal the thread to stop processing"""
+        """Signal the thread and the FocusStacker instance to stop processing"""
         self.stopped = True
+        if hasattr(self, 'stacker') and self.stacker:
+            self.stacker.request_stop()
 
 class MainWindow(QMainWindow):
     """
@@ -64,19 +67,14 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.image_paths = []
-        self.stacks = [] # Initialize stacks list
+        self.stack_items = [] # Store (base_name, paths) tuples
 
-        # Default Stacker Configuration
+        # Default Stacker Configuration (Simplified)
         self.stacker_config = {
-            'align_method': 'orb',
-            'focus_measure_method': 'custom',
-            'blend_method': 'weighted',
-            'consistency_filter': False,
-            'consistency_kernel': 5,
-            # 'postprocess': True, # REMOVED postprocess from default config
-            'laplacian_levels': 5,
-            'ecc_motion_type': 'AFFINE',
-            'sharpen_strength': 0.0 # Add default sharpen strength
+            'focus_window_size': 7,
+            'sharpen_strength': 0.0,
+            'num_pyramid_levels': 3, # Default pyramid levels
+            'gradient_threshold': 10 # Default gradient threshold for ECC mask
         }
 
         self.init_ui()
@@ -85,143 +83,62 @@ class MainWindow(QMainWindow):
         """Creates the QGroupBox for stacking parameters."""
         params_group = QGroupBox("Stacking Parameters")
         params_layout = QGridLayout()
-        params_layout.setVerticalSpacing(10)   # Add vertical spacing between rows
-        params_layout.setHorizontalSpacing(15) # Add horizontal spacing between columns
-        # Give more horizontal space to the controls (column 1) than the labels (column 0)
-        params_layout.setColumnStretch(0, 1) # Label column stretch factor
-        params_layout.setColumnStretch(1, 3) # Control column stretch factor
+        params_layout.setVerticalSpacing(10)
+        params_layout.setHorizontalSpacing(15)
+        params_layout.setColumnStretch(0, 1)
+        params_layout.setColumnStretch(1, 3)
         row = 0
 
-        # --- Alignment Method ---
-        align_label = QLabel('Alignment:')
-        self.align_combo = QComboBox()
-        self.align_combo.addItems(['orb', 'ecc', 'akaze']) # Add AKAZE option
-        self.align_combo.setCurrentText(self.stacker_config['align_method'])
-        self.align_combo.currentTextChanged.connect(self.update_stacker_config)
-        # Connect align_combo change to toggle ECC options visibility
-        self.align_combo.currentTextChanged.connect(self.toggle_ecc_options_visibility)
-        params_layout.addWidget(align_label, row, 0)
-        params_layout.addWidget(self.align_combo, row, 1)
+        # --- Pyramid Levels (for ECC Alignment) ---
+        self.pyramid_label = QLabel('Alignment Pyramid Levels:')
+        self.pyramid_spinbox = QSpinBox()
+        self.pyramid_spinbox.setRange(1, 6) # 1 = no pyramid, reasonable upper limit
+        self.pyramid_spinbox.setValue(self.stacker_config.get('num_pyramid_levels', 3))
+        self.pyramid_spinbox.valueChanged.connect(self.update_stacker_config)
+        params_layout.addWidget(self.pyramid_label, row, 0)
+        params_layout.addWidget(self.pyramid_spinbox, row, 1)
         row += 1
 
-        # --- ECC Motion Type (Conditional) ---
-        self.ecc_motion_label = QLabel('ECC Motion Type:')
-        self.ecc_motion_combo = QComboBox()
-        self.ecc_motion_combo.addItems(['AFFINE', 'HOMOGRAPHY', 'TRANSLATION']) # Add more if needed
-        self.ecc_motion_combo.setCurrentText(self.stacker_config['ecc_motion_type'])
-        self.ecc_motion_combo.currentTextChanged.connect(self.update_stacker_config)
-        params_layout.addWidget(self.ecc_motion_label, row, 0)
-        params_layout.addWidget(self.ecc_motion_combo, row, 1)
-        # Show/hide based on alignment method selection
-        self.toggle_ecc_options_visibility() # Set initial visibility
+        # --- Gradient Threshold (for ECC Alignment Mask) ---
+        self.gradient_label = QLabel('Alignment Mask Threshold:')
+        self.gradient_spinbox = QSpinBox()
+        self.gradient_spinbox.setRange(1, 100) # Range for gradient threshold
+        self.gradient_spinbox.setValue(self.stacker_config.get('gradient_threshold', 10))
+        self.gradient_spinbox.valueChanged.connect(self.update_stacker_config)
+        params_layout.addWidget(self.gradient_label, row, 0)
+        params_layout.addWidget(self.gradient_spinbox, row, 1)
         row += 1
 
-
-        # --- Focus Measure Method ---
-        focus_label = QLabel('Focus Measure:')
-        self.focus_combo = QComboBox()
-        # Add the new map method
-        self.focus_combo.addItems(['custom', 'laplacian_variance', 'laplacian_variance_map'])
-        self.focus_combo.setCurrentText(self.stacker_config['focus_measure_method'])
-        self.focus_combo.currentTextChanged.connect(self.update_stacker_config)
-        params_layout.addWidget(focus_label, row, 0)
-        params_layout.addWidget(self.focus_combo, row, 1)
-        row += 1
-
-        # --- Focus Window Size (Conditional) ---
+        # --- Focus Window Size ---
         self.focus_window_label = QLabel('Focus Window Size:')
         self.focus_window_spinbox = QSpinBox()
-        self.focus_window_spinbox.setRange(3, 21) # Odd numbers usually
+        self.focus_window_spinbox.setRange(3, 21)
         self.focus_window_spinbox.setSingleStep(2)
-        # Retrieve default from config if exists, else use 9
-        default_focus_window = self.stacker_config.get('focus_window_size', 9)
-        self.focus_window_spinbox.setValue(default_focus_window)
+        self.focus_window_spinbox.setValue(self.stacker_config.get('focus_window_size', 7))
         self.focus_window_spinbox.valueChanged.connect(self.update_stacker_config)
         params_layout.addWidget(self.focus_window_label, row, 0)
         params_layout.addWidget(self.focus_window_spinbox, row, 1)
-        # Show/hide based on focus measure method selection
-        self.focus_window_label.setVisible(self.stacker_config['focus_measure_method'] == 'laplacian_variance_map')
-        self.focus_window_spinbox.setVisible(self.stacker_config['focus_measure_method'] == 'laplacian_variance_map')
-        self.focus_combo.currentTextChanged.connect(lambda text: self.focus_window_label.setVisible(text == 'laplacian_variance_map'))
-        self.focus_combo.currentTextChanged.connect(lambda text: self.focus_window_spinbox.setVisible(text == 'laplacian_variance_map'))
         row += 1
 
-
-        # --- Blending Method ---
-        blend_label = QLabel('Blending:')
-        self.blend_combo = QComboBox()
-        self.blend_combo.addItems(['weighted', 'laplacian']) # Add more as implemented
-        self.blend_combo.setCurrentText(self.stacker_config['blend_method'])
-        self.blend_combo.currentTextChanged.connect(self.update_stacker_config)
-        params_layout.addWidget(blend_label, row, 0)
-        params_layout.addWidget(self.blend_combo, row, 1)
-        row += 1
-
-        # --- Laplacian Levels (Conditional) ---
-        self.laplacian_label = QLabel('Laplacian Levels:')
-        self.laplacian_spinbox = QSpinBox()
-        self.laplacian_spinbox.setRange(2, 10)
-        self.laplacian_spinbox.setValue(self.stacker_config['laplacian_levels'])
-        self.laplacian_spinbox.valueChanged.connect(self.update_stacker_config)
-        params_layout.addWidget(self.laplacian_label, row, 0)
-        params_layout.addWidget(self.laplacian_spinbox, row, 1)
-        # Show/hide based on blend method selection
-        self.laplacian_label.setVisible(self.stacker_config['blend_method'] == 'laplacian')
-        self.laplacian_spinbox.setVisible(self.stacker_config['blend_method'] == 'laplacian')
-        self.blend_combo.currentTextChanged.connect(lambda text: self.laplacian_label.setVisible(text == 'laplacian'))
-        self.blend_combo.currentTextChanged.connect(lambda text: self.laplacian_spinbox.setVisible(text == 'laplacian'))
-        row += 1
-
-        # --- Consistency Filter (Conditional) ---
-        self.consistency_checkbox = QCheckBox('Apply Consistency Filter')
-        self.consistency_checkbox.setChecked(self.stacker_config['consistency_filter'])
-        self.consistency_checkbox.stateChanged.connect(self.update_stacker_config)
-        self.consistency_kernel_label = QLabel('Filter Kernel Size:')
-        self.consistency_kernel_spinbox = QSpinBox()
-        self.consistency_kernel_spinbox.setRange(3, 21) # Odd numbers usually
-        self.consistency_kernel_spinbox.setSingleStep(2)
-        self.consistency_kernel_spinbox.setValue(self.stacker_config['consistency_kernel'])
-        self.consistency_kernel_spinbox.valueChanged.connect(self.update_stacker_config)
-        params_layout.addWidget(self.consistency_checkbox, row, 0, 1, 2) # Span checkbox
-        row += 1
-        params_layout.addWidget(self.consistency_kernel_label, row, 0)
-        params_layout.addWidget(self.consistency_kernel_spinbox, row, 1)
-        # Show/hide kernel size based on checkbox and blend method
-        show_consistency_kernel = (self.stacker_config['consistency_filter'] and self.stacker_config['blend_method'] == 'laplacian')
-        self.consistency_kernel_label.setVisible(show_consistency_kernel)
-        self.consistency_kernel_spinbox.setVisible(show_consistency_kernel)
-        self.consistency_checkbox.stateChanged.connect(self.toggle_consistency_kernel_visibility)
-        self.blend_combo.currentTextChanged.connect(self.toggle_consistency_kernel_visibility)
-        row += 1
-
-        # --- Sharpening ---
+        # --- Sharpening Strength ---
         self.sharpen_label = QLabel('Sharpening Strength:')
         self.sharpen_spinbox = QDoubleSpinBox()
-        self.sharpen_spinbox.setRange(0.0, 3.0) # Allow 0.0 (off) up to strong sharpening
+        self.sharpen_spinbox.setRange(0.0, 3.0)
         self.sharpen_spinbox.setSingleStep(0.1)
         self.sharpen_spinbox.setDecimals(2)
         self.sharpen_spinbox.setValue(self.stacker_config.get('sharpen_strength', 0.0))
         self.sharpen_spinbox.valueChanged.connect(self.update_stacker_config)
-        # Add the widgets to the layout (This was missing!)
         params_layout.addWidget(self.sharpen_label, row, 0)
         params_layout.addWidget(self.sharpen_spinbox, row, 1)
         row += 1
 
+        # Add stretch to push controls to the top
+        params_layout.setRowStretch(row, 1)
 
         params_group.setLayout(params_layout)
         return params_group
 
-    def toggle_ecc_options_visibility(self):
-        """Shows/hides the ECC motion type dropdown based on alignment selection."""
-        show = (self.align_combo.currentText() == 'ecc')
-        self.ecc_motion_label.setVisible(show)
-        self.ecc_motion_combo.setVisible(show)
-
-    def toggle_consistency_kernel_visibility(self):
-        """Shows/hides the consistency kernel size controls based on checkbox and blend method."""
-        show = (self.consistency_checkbox.isChecked() and self.blend_combo.currentText() == 'laplacian')
-        self.consistency_kernel_label.setVisible(show)
-        self.consistency_kernel_spinbox.setVisible(show)
+    # Removed toggle visibility functions
 
     def _create_output_group(self):
         """Creates the QGroupBox for output settings."""
@@ -231,17 +148,18 @@ class MainWindow(QMainWindow):
         # Output Base Name
         name_label = QLabel('Output Base Name:')
         self.output_name_edit = QLineEdit()
-        self.output_name_edit.setPlaceholderText("Default: stack_NofM_timestamp")
+        self.output_name_edit.setPlaceholderText("Default: [Original Stack Name]") # Updated placeholder
 
         # Format
         format_label = QLabel('Format:')
         self.format_combo = QComboBox()
-        self.format_combo.addItems(['JPEG']) # Only JPEG supported for now
+        self.format_combo.addItems(['JPEG', 'PNG', 'TIFF']) # Added more formats
+        self.format_combo.setCurrentText('JPEG') # Keep JPEG default
 
         # Color Space
         color_label = QLabel('Color Space:')
         self.color_combo = QComboBox()
-        self.color_combo.addItems(['sRGB'])
+        self.color_combo.addItems(['sRGB']) # Keep sRGB for now
 
         # Add widgets to layout
         output_layout.addWidget(name_label, 0, 0)
@@ -271,8 +189,8 @@ class MainWindow(QMainWindow):
     def init_ui(self):
         """Initialize the user interface"""
         self.setWindowTitle('Focus Stacking Tool')
-        # Increase minimum height further
-        self.setMinimumSize(600, 600)
+        # Adjust minimum size if needed, but keep it reasonable
+        self.setMinimumSize(500, 400) # Reduced size as fewer options
 
         # Central Widget and Main Layout
         central_widget = QWidget()
@@ -302,87 +220,60 @@ class MainWindow(QMainWindow):
 
     def update_stacker_config(self):
         """Update the stacker configuration dictionary from UI controls."""
-        self.stacker_config['align_method'] = self.align_combo.currentText()
-        self.stacker_config['focus_measure_method'] = self.focus_combo.currentText()
-        self.stacker_config['blend_method'] = self.blend_combo.currentText()
-        self.stacker_config['laplacian_levels'] = self.laplacian_spinbox.value()
-        self.stacker_config['consistency_filter'] = self.consistency_checkbox.isChecked()
-        self.stacker_config['consistency_kernel'] = self.consistency_kernel_spinbox.value()
+        # Only update the parameters that still exist in the UI
+        self.stacker_config['num_pyramid_levels'] = self.pyramid_spinbox.value()
+        self.stacker_config['gradient_threshold'] = self.gradient_spinbox.value() # Add gradient threshold
         self.stacker_config['focus_window_size'] = self.focus_window_spinbox.value()
-        self.stacker_config['ecc_motion_type'] = self.ecc_motion_combo.currentText()
         self.stacker_config['sharpen_strength'] = self.sharpen_spinbox.value()
 
-
-        # Optional: Could re-instantiate self.stacker here if needed immediately,
-        # but it's safer to create it fresh in the processing thread.
         print("\nStacker configuration updated:")
         for key, value in self.stacker_config.items():
             print(f"  {key}: {value}")
 
     def detect_stack_size(self, image_paths):
-        """
-        Detect stack size by finding sequences in filenames
-        @param image_paths List of image paths
-        @return Number of images per stack
-        """
-        # Group files by base name (part before the last number sequence)
-        stacks = {}
-        for path in image_paths:
-            filename = os.path.splitext(os.path.basename(path))[0]
-            match = re.search(r'^(.+?)(\d+)$', filename) # Find base name and trailing number
-            if match:
-                base_name = match.group(1)
-                number = int(match.group(2))
-                if base_name not in stacks:
-                    stacks[base_name] = []
-                stacks[base_name].append(number)
-        # (Old stack size detection logic removed)
+        # This function is no longer needed as logic is in utils.split_into_stacks
         pass
 
     def load_images(self):
         """Open file dialog to select images and use utils.split_into_stacks"""
         file_dialog = QFileDialog()
         file_dialog.setFileMode(QFileDialog.ExistingFiles)
-        # Allow various image types
         file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)")
 
         if file_dialog.exec_():
-            self.image_paths = file_dialog.selectedFiles() # Keep unsorted list from dialog
+            self.image_paths = file_dialog.selectedFiles()
             if not self.image_paths:
                 self.status_label.setText("No images selected.")
                 return
 
             print(f"\nSelected {len(self.image_paths)} image files.")
 
-            # Use the utility function to split into stacks
             try:
-                self.stacks = utils.split_into_stacks(self.image_paths, stack_size=0)
+                self.stack_items = utils.split_into_stacks(self.image_paths, stack_size=0)
             except ImportError:
                  QMessageBox.warning(self, 'Error', 'Failed to import natsort for natural sorting. Stacks might be ordered incorrectly.')
-                 self.stacks = [] # Fallback
+                 self.stack_items = [] # Fallback
             except Exception as e:
                  QMessageBox.critical(self, 'Error', f'Failed to split images into stacks: {e}')
-                 self.stacks = []
+                 self.stack_items = []
                  return
 
-
-            if not self.stacks:
+            if not self.stack_items:
                  warning_msg = "Could not detect distinct stacks based on filenames. Treating all images as one stack."
                  print(f"Warning: {warning_msg}")
-                 self.stacks = [sorted(self.image_paths)] # Treat all as one stack, ensure sorted
+                 self.stack_items = [("stack", sorted(self.image_paths))]
 
-            num_images_in_stacks = sum(len(s) for s in self.stacks)
-            self.status_label.setText(f'Loaded {num_images_in_stacks} images in {len(self.stacks)} stacks.')
-            print(f"Successfully split into {len(self.stacks)} stacks.")
+            num_images_in_stacks = sum(len(item[1]) for item in self.stack_items)
+            self.status_label.setText(f'Loaded {num_images_in_stacks} images in {len(self.stack_items)} stacks.')
+            print(f"Successfully split into {len(self.stack_items)} stacks.")
 
     def process_stack(self):
         """Start the focus stacking process"""
-        if not self.image_paths or not self.stacks: # Check self.stacks as well
+        if not self.image_paths or not self.stack_items:
             QMessageBox.warning(self, 'Error', 'Please load images first (ensure stacks were detected).')
             return
 
-        # Ensure config is up-to-date before starting
-        self.update_stacker_config()
+        self.update_stacker_config() # Ensure config is up-to-date
 
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
@@ -390,16 +281,15 @@ class MainWindow(QMainWindow):
         self.processed_stack_count = 0
         self.stop_btn.setEnabled(True)
 
-        self._process_next_stack() # Start processing the first stack
+        self._process_next_stack()
 
     def stop_processing(self):
         """Stop the current processing operation"""
         if hasattr(self, 'thread') and self.thread.isRunning():
             print("\nStopping processing...")
-            self.thread.stop() # Signal thread to stop
-            self.thread.wait() # Wait for thread to finish cleanly
-            
-            # Reset UI state
+            self.thread.stop()
+            self.thread.wait()
+
             self.progress_bar.setVisible(False)
             self.stop_btn.setEnabled(False)
             self.status_label.setText('Processing stopped')
@@ -407,84 +297,82 @@ class MainWindow(QMainWindow):
 
     def _process_next_stack(self):
         """Process the next stack in the queue"""
-        if self.current_stack >= len(self.stacks):
+        if self.current_stack >= len(self.stack_items):
             print("\nAll stacks processed!")
             self.processing_all_finished()
             return
-            
-        # Update overall progress bar
-        overall_progress = (self.current_stack * 100) // len(self.stacks)
-        self.progress_bar.setValue(overall_progress)
-        
-        current_image_stack = self.stacks[self.current_stack]
-        print(f"\n=== Processing stack {self.current_stack + 1}/{len(self.stacks)} ===")
-        print(f"Stack contains {len(current_image_stack)} images.")
 
-        # Create and start processing thread for the current stack
+        overall_progress = (self.current_stack * 100) // len(self.stack_items)
+        self.progress_bar.setValue(overall_progress)
+
+        current_stack_base_name, current_image_paths = self.stack_items[self.current_stack]
+
+        print(f"\n=== Processing stack {self.current_stack + 1}/{len(self.stack_items)} ('{current_stack_base_name}') ===")
+        print(f"Stack contains {len(current_image_paths)} images.")
+
         self.thread = FocusStackingThread(
-            self.stacker_config.copy(), # Pass a copy of the config
-            current_image_stack,
-            self.color_combo.currentText() # Still using sRGB only for now
+            self.stacker_config.copy(),
+            current_image_paths,
+            self.color_combo.currentText()
         )
         self.thread.finished.connect(self.processing_one_finished)
         self.thread.error.connect(self.processing_error)
         self.thread.start()
 
     def processing_one_finished(self, result):
-        """Handle completion of one stack
-        @param result Processed image (NumPy array)
-        """
-        print(f"\n=== Saving result for stack {self.current_stack + 1} ===")
-        
-        # Determine filename based on user input or default
-        base_name = self.output_name_edit.text().strip()
-        # Get format from combo box (though only JPEG is supported currently)
+        """Handle completion of one stack"""
+        original_stack_base_name, _ = self.stack_items[self.current_stack]
+
+        print(f"\n=== Saving result for stack '{original_stack_base_name}' ({self.current_stack + 1}/{len(self.stack_items)}) ===")
+
+        user_prefix = self.output_name_edit.text().strip()
         output_format = self.format_combo.currentText().upper()
         ext = f'.{output_format.lower()}'
 
-        if base_name:
-            # Use user-provided base name, add stack number if multiple stacks
-            if len(self.stacks) > 1:
-                 filename = f'{base_name}_{self.current_stack + 1}of{len(self.stacks)}{ext}'
-            else:
-                 filename = f'{base_name}{ext}'
-        else:
-            # Fallback to default timestamp-based name
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            if len(self.stacks) > 1:
-                 filename = f'stack_{self.current_stack + 1}of{len(self.stacks)}_{timestamp}{ext}'
-            else:
-                 filename = f'stack_{timestamp}{ext}'
+        match = re.search(r'(\d+)$', original_stack_base_name)
+        stack_number_str = match.group(1) if match else None
 
-        # Use 'results' directory consistent with project structure
+        if user_prefix:
+            if stack_number_str:
+                filename = f'{user_prefix}_{stack_number_str}{ext}'
+            else:
+                print(f"  Warning: Could not extract trailing number from original stack name '{original_stack_base_name}'. Using sequential numbering.")
+                if len(self.stack_items) > 1:
+                    filename = f'{user_prefix}_{self.current_stack + 1}of{len(self.stack_items)}{ext}'
+                else:
+                    filename = f'{user_prefix}{ext}'
+        else:
+            safe_base_name = re.sub(r'[\\/*?:"<>| ]+', '_', original_stack_base_name)
+            if not safe_base_name: safe_base_name = "stack"
+            filename = f'{safe_base_name}{ext}'
+
+        if not filename or filename == ext:
+             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+             print(f"  Warning: Filename generation resulted in empty name. Using timestamp fallback.")
+             filename = f'stack_{timestamp}{ext}'
+
         output_dir = 'results'
         output_path = os.path.join(output_dir, filename)
 
         try:
-            # Ensure output directory exists
             os.makedirs(output_dir, exist_ok=True)
             print(f"Saving to: {output_path}")
-
-            # Save the resulting image using the utility function directly
-            # Pass format and color space from UI
             utils.save_image(
                 result,
                 output_path,
                 format=output_format,
-                color_space=self.color_combo.currentText() # Assumes result is sRGB before saving
+                color_space=self.color_combo.currentText()
             )
             print(f"Successfully saved stack result.")
             self.processed_stack_count += 1
-            status_text = f'Completed stack {self.current_stack + 1} of {len(self.stacks)}'
+            status_text = f"Completed stack '{original_stack_base_name}' ({self.current_stack + 1} of {len(self.stack_items)})"
             print(status_text)
             self.status_label.setText(status_text)
         except Exception as e:
             error_msg = f'Failed to save image: {str(e)}'
             print(f"ERROR: {error_msg}")
             QMessageBox.critical(self, 'Error', error_msg)
-            # Stop processing further stacks on save error? Decide policy later if needed.
-            
-        # Process the next stack
+
         self.current_stack += 1
         self._process_next_stack()
 
@@ -499,9 +387,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(status_text)
 
     def processing_error(self, error_msg):
-        """Handle processing errors
-        @param error_msg Error message to display
-        """
+        """Handle processing errors"""
         QMessageBox.critical(self, 'Error', f'Processing failed: {error_msg}')
         self.progress_bar.setVisible(False)
         self.stop_btn.setEnabled(False)
