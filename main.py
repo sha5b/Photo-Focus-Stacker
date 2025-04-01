@@ -8,7 +8,8 @@ from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QPushButton, QLabel, QFileDialog,
                             QComboBox, QProgressBar, QMessageBox, QGroupBox,
-                            QGridLayout, QLineEdit, QCheckBox, QSpinBox) # Added QCheckBox, QSpinBox
+                            QGridLayout, QLineEdit, QCheckBox, QSpinBox,
+                            QDoubleSpinBox) # Added QDoubleSpinBox
 from PyQt5.QtCore import QThread, pyqtSignal
 
 # Import from the new structure
@@ -74,11 +75,9 @@ class MainWindow(QMainWindow):
             'consistency_kernel': 5,
             # 'postprocess': True, # REMOVED postprocess from default config
             'laplacian_levels': 5,
-            'ecc_motion_type': 'AFFINE' # Add default ECC motion type
+            'ecc_motion_type': 'AFFINE',
+            'sharpen_strength': 0.0 # Add default sharpen strength
         }
-
-        # Create initial stacker instance (will be updated by UI)
-        # self.stacker = FocusStacker(**self.stacker_config) # No longer needed here
 
         self.init_ui()
 
@@ -195,12 +194,18 @@ class MainWindow(QMainWindow):
         self.blend_combo.currentTextChanged.connect(self.toggle_consistency_kernel_visibility)
         row += 1
 
-        # --- Post-processing --- REMOVED
-        # self.postprocess_checkbox = QCheckBox('Apply Post-processing (Contrast/Sharpen)')
-        # self.postprocess_checkbox.setChecked(self.stacker_config['postprocess'])
-        # self.postprocess_checkbox.stateChanged.connect(self.update_stacker_config)
-        # params_layout.addWidget(self.postprocess_checkbox, row, 0, 1, 2) # Span checkbox
-        # row += 1
+        # --- Sharpening ---
+        self.sharpen_label = QLabel('Sharpening Strength:')
+        self.sharpen_spinbox = QDoubleSpinBox()
+        self.sharpen_spinbox.setRange(0.0, 3.0) # Allow 0.0 (off) up to strong sharpening
+        self.sharpen_spinbox.setSingleStep(0.1)
+        self.sharpen_spinbox.setDecimals(2)
+        self.sharpen_spinbox.setValue(self.stacker_config.get('sharpen_strength', 0.0))
+        self.sharpen_spinbox.valueChanged.connect(self.update_stacker_config)
+        # Add the widgets to the layout (This was missing!)
+        params_layout.addWidget(self.sharpen_label, row, 0)
+        params_layout.addWidget(self.sharpen_spinbox, row, 1)
+        row += 1
 
 
         params_group.setLayout(params_layout)
@@ -303,10 +308,9 @@ class MainWindow(QMainWindow):
         self.stacker_config['laplacian_levels'] = self.laplacian_spinbox.value()
         self.stacker_config['consistency_filter'] = self.consistency_checkbox.isChecked()
         self.stacker_config['consistency_kernel'] = self.consistency_kernel_spinbox.value()
-        # self.stacker_config['postprocess'] = self.postprocess_checkbox.isChecked() # REMOVED
         self.stacker_config['focus_window_size'] = self.focus_window_spinbox.value()
-        # Add ECC motion type to config update
         self.stacker_config['ecc_motion_type'] = self.ecc_motion_combo.currentText()
+        self.stacker_config['sharpen_strength'] = self.sharpen_spinbox.value()
 
 
         # Optional: Could re-instantiate self.stacker here if needed immediately,
@@ -332,10 +336,8 @@ class MainWindow(QMainWindow):
                 if base_name not in stacks:
                     stacks[base_name] = []
                 stacks[base_name].append(number)
-        # Use the refactored utility function for splitting
-        # This function needs to be called *after* loading images
-        # Let's adjust the load_images function instead.
-        pass # Remove old logic
+        # (Old stack size detection logic removed)
+        pass
 
     def load_images(self):
         """Open file dialog to select images and use utils.split_into_stacks"""
@@ -353,16 +355,11 @@ class MainWindow(QMainWindow):
             print(f"\nSelected {len(self.image_paths)} image files.")
 
             # Use the utility function to split into stacks
-            # Pass 0 for stack_size to auto-detect based on names
             try:
-                # We need an instance of FocusStacker to call split_into_stacks
-                # Or make split_into_stacks a static method or move it entirely to utils
-                # Let's assume it's moved entirely to utils (which we did)
                 self.stacks = utils.split_into_stacks(self.image_paths, stack_size=0)
             except ImportError:
                  QMessageBox.warning(self, 'Error', 'Failed to import natsort for natural sorting. Stacks might be ordered incorrectly.')
-                 # Fallback or handle error appropriately
-                 self.stacks = [] # Or basic splitting logic here
+                 self.stacks = [] # Fallback
             except Exception as e:
                  QMessageBox.critical(self, 'Error', f'Failed to split images into stacks: {e}')
                  self.stacks = []
@@ -372,8 +369,6 @@ class MainWindow(QMainWindow):
             if not self.stacks:
                  warning_msg = "Could not detect distinct stacks based on filenames. Treating all images as one stack."
                  print(f"Warning: {warning_msg}")
-                 # QMessageBox.information(self, 'Stack Detection', warning_msg) # Can be annoying
-                 # Ensure the fallback stack is also sorted if needed, though split_into_stacks should handle sorting
                  self.stacks = [sorted(self.image_paths)] # Treat all as one stack, ensure sorted
 
             num_images_in_stacks = sum(len(s) for s in self.stacks)
@@ -424,10 +419,8 @@ class MainWindow(QMainWindow):
         current_image_stack = self.stacks[self.current_stack]
         print(f"\n=== Processing stack {self.current_stack + 1}/{len(self.stacks)} ===")
         print(f"Stack contains {len(current_image_stack)} images.")
-        # print("Stack images:", current_image_stack) # Can be verbose
 
         # Create and start processing thread for the current stack
-        # Pass the current stacker configuration dictionary
         self.thread = FocusStackingThread(
             self.stacker_config.copy(), # Pass a copy of the config
             current_image_stack,
@@ -489,7 +482,7 @@ class MainWindow(QMainWindow):
             error_msg = f'Failed to save image: {str(e)}'
             print(f"ERROR: {error_msg}")
             QMessageBox.critical(self, 'Error', error_msg)
-            # Stop processing further stacks on save error? Or continue? Currently continues.
+            # Stop processing further stacks on save error? Decide policy later if needed.
             
         # Process the next stack
         self.current_stack += 1

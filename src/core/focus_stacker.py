@@ -9,7 +9,7 @@ from . import utils
 from . import alignment
 from . import focus_measure
 from . import blending
-# from . import postprocessing # REMOVED postprocessing import
+from . import postprocessing # Import the postprocessing module
 
 class FocusStacker:
     def __init__(self,
@@ -20,7 +20,8 @@ class FocusStacker:
                  consistency_kernel=5,     # Kernel size for consistency filter
                  laplacian_levels=5,       # Levels for Laplacian pyramid blending
                  focus_window_size=9,      # Window size for laplacian_variance_map
-                 ecc_motion_type='AFFINE'  # Motion type for ECC alignment
+                 ecc_motion_type='AFFINE', # Motion type for ECC alignment
+                 sharpen_strength=0.0      # Strength for final sharpening
                  ):
         """
          Initializes the FocusStacker orchestrator.
@@ -34,26 +35,29 @@ class FocusStacker:
          @param laplacian_levels: Number of levels for Laplacian pyramid blending.
          @param focus_window_size: Window size for 'laplacian_variance_map' method (default: 9).
          @param ecc_motion_type: Motion model for ECC ('AFFINE', 'HOMOGRAPHY', 'TRANSLATION'). Default: 'AFFINE'.
+         @param sharpen_strength: Strength of Unsharp Mask filter applied at the end (0.0 to disable). Default: 0.0.
         """
         print("Initializing FocusStacker...")
         self.align_method = align_method
         self.focus_measure_method = focus_measure_method
         self.blend_method = blend_method
-         self.consistency_filter = consistency_filter
-         self.consistency_kernel = consistency_kernel
-         self.laplacian_levels = laplacian_levels
-         self.focus_window_size = focus_window_size # Store window size
+        self.consistency_filter = consistency_filter
+        self.consistency_kernel = consistency_kernel
+        self.laplacian_levels = laplacian_levels
+        self.focus_window_size = focus_window_size # Store window size
         self.ecc_motion_type = ecc_motion_type # Store ECC motion type
+        self.sharpen_strength = sharpen_strength # Store sharpening strength
 
         # Initialize color profiles (now handled in utils)
         utils.init_color_profiles()
         # Update print statement to show ECC motion type if applicable
         print(f"  Alignment: {self.align_method}{' (Motion=' + self.ecc_motion_type + ')' if self.align_method == 'ecc' else ''}")
         print(f"  Focus Measure: {self.focus_measure_method}{' (window=' + str(self.focus_window_size) + ')' if self.focus_measure_method == 'laplacian_variance_map' else ''}")
-         print(f"  Blending: {self.blend_method}")
-         print(f"  Consistency Filter: {'Enabled (k=' + str(self.consistency_kernel) + ')' if self.consistency_filter else 'Disabled'}")
-         if self.blend_method == 'laplacian':
-             print(f"  Laplacian Levels: {self.laplacian_levels}")
+        print(f"  Blending: {self.blend_method}")
+        print(f"  Consistency Filter: {'Enabled (k=' + str(self.consistency_kernel) + ')' if self.consistency_filter else 'Disabled'}")
+        if self.blend_method == 'laplacian':
+            print(f"  Laplacian Levels: {self.laplacian_levels}")
+        print(f"  Sharpen Strength: {self.sharpen_strength:.2f}")
 
 
     def process_stack(self, image_paths, color_space='sRGB'):
@@ -63,7 +67,7 @@ class FocusStacker:
         @param image_paths: List of paths to the images in the stack.
         @param color_space: Target color space for the output (e.g., 'sRGB', 'AdobeRGB').
                             Conversion happens at the end if needed.
-        @return: The final processed (stacked) image as a float32 NumPy array [0, 1].
+        @return: The final processed (stacked and sharpened) image as a float32 NumPy array [0, 1].
         """
         if not image_paths or len(image_paths) < 2:
             raise ValueError("Focus stacking requires at least 2 image paths.")
@@ -99,9 +103,9 @@ class FocusStacker:
             print(f"Alignment complete ({len(aligned_images)} images).")
         except Exception as e:
             print(f"ERROR during image alignment: {e}")
-             raise
+            raise
 
-         # 3. Calculate focus measures using selected method
+        # 3. Calculate focus measures using selected method
         print(f"\nCalculating focus measures using '{self.focus_measure_method}' method...")
         focus_maps = []
         for i, img in enumerate(aligned_images):
@@ -117,8 +121,6 @@ class FocusStacker:
                 elif self.focus_measure_method == 'laplacian_variance':
                     # Laplacian variance (single value) expects grayscale
                     img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-                    # We need a map, not a single value. Apply variance in windows?
-                    # For now, let's adapt the custom measure logic slightly or use a simpler map.
                     # Using simple absolute Laplacian as a map for now.
                     lap = cv2.Laplacian(img_gray, cv2.CV_32F, ksize=3)
                     focus_map = np.abs(lap)
@@ -155,23 +157,30 @@ class FocusStacker:
                 else:
                     indices_to_blend = sharpest_indices # Use unfiltered indices
 
-                # Pass the (potentially filtered) index map to the blending function
-                 # Pass the filtered indices map to the blending function
-                 blended_image = blending.blend_laplacian_pyramid(aligned_images, indices_to_blend, levels=self.laplacian_levels)
+                # Pass the filtered indices map to the blending function
+                blended_image = blending.blend_laplacian_pyramid(aligned_images, indices_to_blend, levels=self.laplacian_levels)
 
-             else:
+            else:
                 print(f"Warning: Unknown blend method '{self.blend_method}'. Averaging images.")
                 blended_image = np.mean(np.stack(aligned_images, axis=0), axis=0).astype(np.float32)
 
             print("Blending complete.")
         except Exception as e:
             print(f"ERROR during image blending: {e}")
-             raise
+            raise
 
-         # 5. Post-processing was removed. Result is the blended image.
-         final_result = blended_image
+        # 5. Apply Sharpening (if strength > 0)
+        if self.sharpen_strength > 0:
+            try:
+                final_result = postprocessing.apply_unsharp_mask(blended_image, strength=self.sharpen_strength)
+            except Exception as e:
+                print(f"ERROR during sharpening: {e}. Returning blended image without sharpening.")
+                final_result = blended_image # Fallback to blended result
+        else:
+            print("\nSkipping sharpening.")
+            final_result = blended_image # No sharpening applied
 
-         # 6. Color space conversion (if needed) using utility function
+        # 6. Color space conversion (if needed) using utility function
         if color_space != 'sRGB':
             try:
                 # Assume the result is currently in sRGB after processing
@@ -195,4 +204,4 @@ class FocusStacker:
         return utils.split_into_stacks(image_paths, stack_size=stack_size)
 
     # --- Removed methods that were moved to other modules ---
-     # (Removed methods are now handled in respective modules)
+    # (Removed methods are now handled in respective modules)

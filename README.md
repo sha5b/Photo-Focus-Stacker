@@ -40,7 +40,7 @@ python src/main.py
     *   **Laplacian Levels:** (Only for `laplacian` blending) Number of pyramid levels used for blending. More levels capture finer details but increase processing time. Default: 5.
     *   **Apply Consistency Filter:** (Recommended for `laplacian` blending) Applies a median filter to the internal map that decides which source image is sharpest at each pixel. Reduces noise and small inconsistent regions.
     *   **Filter Kernel Size:** (Only if Consistency Filter is checked) Size of the median filter kernel (must be odd). Larger values increase smoothing. Default: 5.
-    *   ~~**Apply Post-processing:**~~ (This option has been removed).
+    *   **Sharpening Strength:** Controls the amount of Unsharp Masking applied to the final image. 0.0 means no sharpening. Values around 0.5-1.0 provide moderate sharpening. Higher values increase sharpness but may amplify noise. Default: 0.0.
 4. **Output Settings:** Optionally set a base name for the output files.
 5. **Process:** Click "Process Stack". The results will be saved in the `results/` directory.
 
@@ -194,8 +194,8 @@ When initializing `FocusStacker` in your Python code, you can customize its beha
     *   `'laplacian'`: Pyramid-based blending for smoother transitions.
 *   `consistency_filter` (bool, default=False): Apply median filter to the internal sharpness selection map before Laplacian blending. Helps reduce noise. Recommended if `blend_method='laplacian'`.
 *   `consistency_kernel` (int, default=5): Kernel size for the consistency filter (must be odd). Used only if `consistency_filter=True`.
-*   ~~`postprocess` (bool, default=True):~~ This parameter has been removed.
 *   `laplacian_levels` (int, default=5): Number of pyramid levels used in Laplacian blending. Used only if `blend_method='laplacian'`.
+*   `sharpen_strength` (float, default=0.0): Strength of the final Unsharp Mask filter. Set to 0.0 to disable.
 
 ## Contributing
 

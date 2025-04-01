@@ -17,8 +17,6 @@ def init_color_profiles():
     if not _COLOR_PROFILES: # Initialize only once
         try:
             _COLOR_PROFILES['sRGB'] = PIL.ImageCms.createProfile('sRGB')
-            # Add other common profiles if needed later
-            # _COLOR_PROFILES['AdobeRGB'] = PIL.ImageCms.createProfile('AdobeRGB')
             print("Initialized sRGB color profile.")
         except Exception as e:
             print(f"Warning: Could not initialize color profiles: {e}")
@@ -61,10 +59,6 @@ def save_image(img, path, format='JPEG', quality=95, color_space='sRGB'):
         if format.upper() == 'JPEG':
             save_options['quality'] = quality
             save_options['optimize'] = True
-            # Note: ICC profile embedding might be needed for color accuracy if not sRGB
-            # if color_space != 'sRGB':
-            #     profile = get_color_profile(color_space)
-            #     if profile: save_options['icc_profile'] = profile.tobytes()
         elif format.upper() == 'PNG':
             save_options['compress_level'] = 6 # Example
         elif format.upper() == 'TIFF':
@@ -109,17 +103,12 @@ def split_into_stacks(image_paths, stack_size=0):
                 # Determine base name and number based on pattern structure
                 if pattern == patterns[0] or pattern == patterns[1]: # BaseName first
                     base_name = groups[0].strip() if groups[0] else "default_stack"
-                    # seq_num = int(groups[1]) # Could use sequence number for sorting later if needed
                 elif pattern == patterns[2]: # Number first
                     base_name = groups[1].strip() if groups[1] else "default_stack"
-                    # seq_num = int(groups[0])
                 else: # Fallback
                      base_name = "default_stack" # Should ideally not be reached with current patterns
 
-                # Base name is directly from the captured group, already stripped.
-                # The normalization below was causing issues with names like 'alienshape_0_1'
-                # base_name = re.sub(r'[\s_-]*\d*$', '', base_name).strip()
-                # if not base_name: base_name = "default_stack"
+                # Base name is directly from the captured group.
 
                 if not base_name: # Handle cases where regex might capture empty string
                     base_name = "default_stack"
@@ -128,7 +117,6 @@ def split_into_stacks(image_paths, stack_size=0):
                     stacks_dict[base_name] = []
                 stacks_dict[base_name].append(path)
                 matched = True
-                # print(f"  Matched '{filename}' to stack '{base_name}' using pattern {patterns.index(pattern)}") # Debug
                 break # Stop after first successful pattern match
 
         if not matched:
@@ -201,10 +189,6 @@ def convert_color_space(img, target_space, source_space='sRGB'):
         return img
 
     try:
-        # Ensure profiles are in the correct format if loaded differently later
-        # source_profile_obj = PIL.ImageCms.getOpenProfile(source_profile)
-        # target_profile_obj = PIL.ImageCms.getOpenProfile(target_profile)
-
         transform = PIL.ImageCms.buildTransformFromOpenProfiles(
             source_profile, target_profile, "RGB", "RGB",
             renderingIntent=PIL.ImageCms.INTENT_PERCEPTUAL # Or RELATIVE_COLORIMETRIC
