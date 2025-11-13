@@ -1,0 +1,49 @@
+# Context: Packaging configuration for Photo Focus Stacker
+# Purpose: Define project metadata, dependencies, and build backend for uv/hatch.
+# Notes: src-based layout is intentional because imports use `from src.core ...`.
+# Usage: Install deps with `uv sync`, run the UI with `uv run python main.py`.
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photo-focus-stacker"
+version = "0.1.0"
+description = "Interactive focus stacking tool (ECC alignment, Laplacian focus maps, custom blending) with PyQt UI."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Shahab Nedaei" }
+]
+keywords = ["focus stacking", "image processing", "photography", "opencv", "pyqt"]
+
+# Dependencies mirrored from requirements.txt (GPU extra moved to optional)
+dependencies = [
+  "numpy>=1.24.0",
+  "opencv-python>=4.8.0",
+  "opencv-contrib-python>=4.8.0",
+  "pillow>=10.0.0",
+  "PyQt5>=5.15.0",
+  "scikit-image>=0.21.0",
+]
+
+[project.optional-dependencies]
+# Install with: uv add .[gpu]  or use in pyproject: uv sync --extra gpu
+gpu = [
+  "cupy-cuda12x>=13.3.0",
+]
+
+[project.urls]
+homepage = "https://github.com/sha5b/Photo-Focus-Stacker"
+
+[tool.hatch.build.targets.wheel]
+# Keep current package layout: install the top-level package named "src"
+packages = ["src"]
+
+[tool.uv]
+# Restrict resolver to current platform so PyQt5 resolves to Windows-compatible wheels
+required-environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'"
+]
