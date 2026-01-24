@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+# Context: Blending routines for Photo Focus Stacker
+# Purpose: Combine aligned source images into a single output using focus maps.
+# Notes: Called by `src.core.focus_stacker.FocusStacker`.
+
 import cv2
 import numpy as np
-
-# --- Weighted Blending (Original Method Refactored) ---
 
 def blend_weighted(aligned_images, focus_maps):
     """
@@ -43,7 +45,6 @@ def blend_weighted(aligned_images, focus_maps):
         depth_gradient = np.sqrt(dx*dx + dy*dy)
 
         # Create depth-aware mask (smoother transitions near focus edges)
-        # Using bilateral filter helps preserve edges while smoothing
         depth_mask = cv2.bilateralFilter(depth_gradient, d=9, sigmaColor=75, sigmaSpace=75)
         min_dg, max_dg = np.min(depth_mask), np.max(depth_mask)
         if max_dg > min_dg:
@@ -53,41 +54,38 @@ def blend_weighted(aligned_images, focus_maps):
 
         # Multi-scale analysis to refine focus weights
         fm_refined = np.zeros_like(fm_2d)
-        # Scales adjusted slightly based on typical image sizes and performance
-        scales = [150, 100, 50, 25] # Kernel sizes (radius)
+        min_dim = int(min(h, w))
+
+        scale_candidates = [
+            min(150, max(5, int(min_dim * 0.15))),
+            min(100, max(5, int(min_dim * 0.10))),
+            min(50, max(5, int(min_dim * 0.05))),
+            min(25, max(5, int(min_dim * 0.025))),
+        ]
+        scales = [s for s in scale_candidates if s > 0]
         weights = [0.4, 0.3, 0.2, 0.1] # Contribution weights
 
         for scale, weight_factor in zip(scales, weights):
             kernel_size = (scale*2+1, scale*2+1)
             sigma = max(scale / 3.0, 1.0) # Ensure sigma is at least 1
 
-            # Gaussian blur of the focus map
             fm_blur = cv2.GaussianBlur(fm_2d, kernel_size, sigma)
 
-            # Edge strength (difference between original and blurred)
             edge_strength = np.abs(fm_2d - fm_blur)
-            # Boost edges based on depth gradient mask
             edge_strength_boosted = edge_strength * (1.0 + depth_mask)
 
-            # Thresholding based on local statistics (more robust threshold)
-            # Use a smaller window for local stats to be more adaptive
             local_mean_edge = cv2.GaussianBlur(edge_strength_boosted, (25, 25), 5)
             local_sq_edge = cv2.GaussianBlur(edge_strength_boosted**2, (25, 25), 5)
             local_std_edge = np.sqrt(np.maximum(local_sq_edge - local_mean_edge**2, 0)) # Avoid negative variance
 
-            # Threshold: mean + k * std_dev, modulated by depth mask
             threshold = local_mean_edge + local_std_edge * (1.5 + 0.5 * depth_mask)
 
-            # Combine weights: Use blurred map where edge strength is high, original otherwise
-            # Weight factor modulated by depth mask
             blend_weight = weight_factor * (1.0 + 0.5 * depth_mask)
             fm_refined += np.where(edge_strength_boosted > threshold, fm_blur * blend_weight, fm_2d * blend_weight)
 
-        # Smooth the refined weights using bilateral filter for edge preservation
         smoothed_weights = cv2.bilateralFilter(fm_refined, d=11, sigmaColor=100, sigmaSpace=100)
         smoothed_weights = cv2.bilateralFilter(smoothed_weights, d=7, sigmaColor=50, sigmaSpace=50)
 
-        # Normalize weights for this image to [0, 1]
         min_w, max_w = np.min(smoothed_weights), np.max(smoothed_weights)
         if max_w > min_w:
             weight_map = (smoothed_weights - min_w) / (max_w - min_w)
@@ -96,19 +94,15 @@ def blend_weighted(aligned_images, focus_maps):
 
         weight_map = weight_map.reshape(h, w, 1) # Ensure 3D for broadcasting
 
-        # Weighted blending
         result += img * weight_map
         weights_sum += weight_map
 
-    # Normalize the final blended image by the sum of weights
-    # Add epsilon to avoid division by zero where weights_sum is zero
     result = result / (weights_sum + epsilon)
     result = np.clip(result, 0.0, 1.0) # Clip final result to [0, 1]
 
     print("Weighted blending complete.")
     return result
 
-# --- Direct Map Blending ---
 
 def blend_direct_map(aligned_images, sharpest_indices):
     """
@@ -131,30 +125,17 @@ def blend_direct_map(aligned_images, sharpest_indices):
     if sharpest_indices.shape != (h, w):
         raise ValueError(f"Shape mismatch: sharpest_indices {sharpest_indices.shape} vs expected {(h, w)}")
 
-    # Create the output image (ensure float32)
     result = np.zeros((h, w, 3), dtype=np.float32)
 
-    # Stack images into a single NumPy array for easier indexing (N, H, W, C)
-    # Ensure all images have the same shape before stacking
     for i, img in enumerate(aligned_images):
         if img.shape[:2] != (h, w):
             raise ValueError(f"Image {i} has shape {img.shape[:2]}, expected {(h, w)}")
     image_stack = np.stack(aligned_images, axis=0)
 
-    # Use advanced indexing to select pixels
-    # Create meshgrid for H and W dimensions
     row_indices, col_indices = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')
-
-    # Select pixels: image_stack[sharpest_indices, row_indices, col_indices]
-    # This selects the pixel from the correct image (indexed by sharpest_indices)
-    # at each (row, col) coordinate.
     result = image_stack[sharpest_indices, row_indices, col_indices]
-
-    # Ensure the result is float32 and clipped (though direct selection shouldn't go out of bounds)
     result = np.clip(result.astype(np.float32), 0.0, 1.0)
 
     print("Direct map blending complete.")
     return result
 
-# Removed Laplacian blending and consistency filter functions
-# Removed blend_direct_select as weighted is now the only option

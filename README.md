@@ -23,13 +23,21 @@ This focus stacking tool was developed specifically for the [OpenScan](https://o
 
 1. Launch the application:
 ```bash
-python src/main.py
+uv sync
+uv run photostacker
 ```
 
-2. **Load Images:** Click "Load Images" and select the image files. The tool groups images into stacks based on filenames (e.g., `scan1_001.jpg`, `scan1_002.jpg`).
-3. **Configure Parameters:** Adjust settings like Alignment Levels, Focus Window, Blending Method, etc. See the **Parameter Tuning Guide** below for details.
-4. **Output Settings:** Optionally set a custom output name prefix and format.
-5. **Process:** Click "Process Stack". Results are saved in the `results/` directory.
+2. **Load Images:** Click "Load Images" and select the image files.
+3. **Stack Detection:** Choose how images are grouped into stacks:
+    *   `Auto (Recommended)`
+    *   `Legacy (name_123-45)`
+    *   `Common suffix (strip last number)`
+    *   `Fixed stack size`
+    *   `Regex (Advanced)`
+4. **Configure Parameters:** Adjust settings like Alignment Levels, Focus Window, Blending Method, etc. See the **Parameter Tuning Guide** below for details.
+5. **Presets:** Use the preset selector (Fast Preview / Balanced / Best Quality) as a starting point.
+6. **Output Settings:** Set output format and output directory.
+7. **Process:** Click "Process Stack".
 
 ### Tips for Best Results
 
@@ -102,62 +110,50 @@ While results depend heavily on the source images, some combinations tend to cau
 
 ## Installation
 
-This tool requires Python 3 (3.8 or higher recommended) and several Python packages.
+This tool requires Python 3.9+.
 
 1.  **Clone the Repository:**
     ```bash
-    git clone https://github.com/your-username/Photo-Focus-Stacker.git # Replace with actual URL if different
+    git clone https://github.com/sha5b/Photo-Focus-Stacker.git
     cd Photo-Focus-Stacker
     ```
 
-2.  **Create and Activate a Virtual Environment:** (Highly Recommended)
+2.  **Install Dependencies (Recommended: uv)**
 
-    Using a virtual environment isolates the project's dependencies from your global Python installation, preventing conflicts between projects.
+    ```bash
+    uv sync
+    ```
 
-    *   **Windows (Command Prompt - cmd.exe):**
-        ```bash
-        # Create the virtual environment (replace 'python' with 'py -3' or specific python path if needed)
-        python -m venv venv
-        # Activate the virtual environment
-        venv\Scripts\activate.bat
-        # Your prompt should now show (venv) at the beginning
-        ```
+    Optional GPU dependencies:
 
-    *   **Windows (PowerShell):**
-        ```powershell
-        # Create the virtual environment (replace 'python' with 'py -3' or specific python path if needed)
-        python -m venv venv
-        # Activate the virtual environment (you might need to adjust execution policy)
-        # Run: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-        venv\Scripts\Activate.ps1
-        # Your prompt should now show (venv) at the beginning
-        ```
+    ```bash
+    uv sync --extra gpu
+    ```
 
-    *   **macOS / Linux (Bash/Zsh):**
-        ```bash
-        # Create the virtual environment (use python3)
-        python3 -m venv venv
-        # Activate the virtual environment
-        source venv/bin/activate
-        # Your prompt should now show (venv) at the beginning
-        ```
+3.  **Install Dependencies (pip - legacy)**
 
-    *   **Deactivating:** When you're finished working on the project, simply type `deactivate` in the terminal.
-
-3.  **Install Requirements:**
-
-    *Ensure your virtual environment is activated before running this command.*
     ```bash
     pip install -r requirements.txt
     ```
-    *Note: This installs packages like OpenCV, NumPy, PyQt5, etc.*
 
 ## Running the Application
 
 Once installed, run the GUI using:
 ```bash
-python src/main.py
+uv run photostacker
 ```
+
+Alternative launch options:
+
+```bash
+uv run python main.py
+```
+
+```bash
+uv run python photostacker
+```
+
+Settings are persisted to a JSON file under `%APPDATA%` on Windows.
 
 ---
 
@@ -167,8 +163,9 @@ You can integrate the focus stacking logic into your own Python scripts.
 
 ```python
 # Ensure you are in the project's root directory or have src in your Python path
-from src.focus_stacker import FocusStacker
-from src.utils import save_image, split_into_stacks # Import necessary utils
+from src.core.focus_stacker import FocusStacker
+from src.core.utils import save_image
+from src.services.stack_detection import detect_stacks
 import glob
 import os
 
@@ -197,8 +194,8 @@ stacker_custom = FocusStacker(
 
 all_images = sorted(glob.glob('path/to/all/images/*.tif')) # Get all images
 if all_images:
-    # Auto-detect stacks based on filenames (e.g., stack1_001.tif, stack1_002.tif, stack2_001.tif)
-    stacks = split_into_stacks(all_images, stack_size=0) # stack_size=0 for auto-detect
+    # Auto-detect stacks (uses a legacy-compatible pattern and a common suffix fallback)
+    stacks = detect_stacks(all_images, mode="auto")
 
     if not stacks:
         print("Could not detect stacks, treating all images as one.")
@@ -207,15 +204,16 @@ if all_images:
     output_dir = 'results/custom_stacks'
     os.makedirs(output_dir, exist_ok=True)
 
-    for i, stack in enumerate(stacks):
-        print(f"\nProcessing custom stack {i+1}/{len(stacks)}...")
-        if stack:
-            result_custom = stacker_custom.process_stack(stack)
-            output_filename = f'custom_stack_{i+1}.png' # Save as PNG
-            save_image(result_custom, os.path.join(output_dir, output_filename), format='PNG')
-            print(f"Saved custom result {i+1}.")
-        else:
-            print(f"Skipping empty stack {i+1}.")
+    for i, (stack_name, stack_paths) in enumerate(stacks, start=1):
+        print(f"\nProcessing custom stack {i}/{len(stacks)}: {stack_name}")
+        if not stack_paths:
+            print(f"Skipping empty stack {i}.")
+            continue
+
+        result_custom = stacker_custom.process_stack(stack_paths)
+        output_filename = f'{stack_name}.png'
+        save_image(result_custom, os.path.join(output_dir, output_filename), format='PNG')
+        print(f"Saved custom result {i}.")
 else:
     print("No images found for multiple stacks example.")
 

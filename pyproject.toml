@@ -38,6 +38,9 @@ gpu = [
 [project.urls]
 homepage = "https://github.com/sha5b/Photo-Focus-Stacker"
 
+[project.scripts]
+photostacker = "src.cli:main"
+
 [tool.hatch.build.targets.wheel]
 # Keep current package layout: install the top-level package named "src"
 packages = ["src"]

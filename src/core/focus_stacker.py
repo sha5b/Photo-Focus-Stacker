@@ -1,15 +1,32 @@
 #!/usr/bin/env python3
 
+# Context: Focus stacking pipeline orchestrator
+# Purpose: Load a stack, align frames, compute focus maps, blend, and optionally post-process.
+# Notes: Used by the PyQt UI worker thread.
+
 import cv2
 import numpy as np
 import os
 
-# Import functions from refactored modules using relative imports
 from . import utils
-from . import alignment # Now contains align_images (Pyramid ECC Homography w/ Masking)
-from . import focus_measure # Now only contains measure_laplacian_variance_map
-from . import blending # Now only contains blend_weighted
-from . import postprocessing # For sharpening
+from . import alignment
+from . import focus_measure
+from . import blending
+
+
+def apply_unsharp_mask(image, strength=0.5, kernel_size=(5, 5), sigma=1.0):
+    """Applies Unsharp Masking to enhance image sharpness."""
+    if strength <= 0:
+        return image
+
+    # Ensure kernel size is odd
+    k_h = kernel_size[0] if kernel_size[0] % 2 != 0 else kernel_size[0] + 1
+    k_w = kernel_size[1] if kernel_size[1] % 2 != 0 else kernel_size[1] + 1
+    kernel_size = (k_h, k_w)
+
+    blurred = cv2.GaussianBlur(image, kernel_size, sigma)
+    sharpened = cv2.addWeighted(image, 1.0 + strength, blurred, -strength, 0)
+    return np.clip(sharpened, 0.0, 1.0)
 
 class StackingCancelledException(Exception):
     """Custom exception for cancelled stacking process."""
@@ -17,11 +34,11 @@ class StackingCancelledException(Exception):
 
 class FocusStacker:
     def __init__(self,
-                 focus_window_size=7,      # Window size for laplacian_variance_map
-                 sharpen_strength=0.0,     # Strength for final sharpening
-                 num_pyramid_levels=3,     # Levels for Pyramid ECC alignment
-                 gradient_threshold=10,    # Threshold for ECC gradient mask
-                 blend_method='weighted'   # New parameter for blending method
+                 focus_window_size=7,
+                 sharpen_strength=0.0,
+                 num_pyramid_levels=3,
+                 gradient_threshold=10,
+                 blend_method='weighted'
                  ):
         """
          Initializes the FocusStacker orchestrator.
@@ -35,7 +52,6 @@ class FocusStacker:
          @param blend_method: Blending method ('weighted' or 'direct_map'). Default: 'weighted'.
         """
         print("Initializing FocusStacker...")
-        # Hardcoded methods are now implicit in the functions called
         self.align_method_desc = f'Pyramid ECC Homography ({num_pyramid_levels} levels, Masked)'
         self.focus_measure_method_desc = f'Laplacian Variance Map (window={focus_window_size})'
 
@@ -46,20 +62,16 @@ class FocusStacker:
             self.blend_method = blend_method
         self.blend_method_desc = 'Weighted' if self.blend_method == 'weighted' else 'Direct Map Selection'
 
-
-        # Store relevant parameters
         self.focus_window_size = focus_window_size
         self.sharpen_strength = sharpen_strength
         self.num_pyramid_levels = num_pyramid_levels
-        self.gradient_threshold = gradient_threshold # Store gradient threshold
-        # self.blend_method = blend_method # Already assigned above
-        self._stop_requested = False # Flag to signal stopping
+        self.gradient_threshold = gradient_threshold
+        self._stop_requested = False
 
-        # Initialize color profiles (now handled in utils)
         utils.init_color_profiles()
         print(f"  Alignment: {self.align_method_desc}")
         print(f"  Focus Measure: {self.focus_measure_method_desc}")
-        print(f"  Blending: {self.blend_method_desc}") # Updated description
+        print(f"  Blending: {self.blend_method_desc}")
         print(f"  Sharpen Strength: {self.sharpen_strength:.2f}")
 
     def request_stop(self):
@@ -82,7 +94,7 @@ class FocusStacker:
                             Conversion happens at the end if needed.
         @return: The final processed (stacked and sharpened) image as a float32 NumPy array [0, 1].
         """
-        self._stop_requested = False # Reset stop flag at the start of processing
+        self._stop_requested = False
         if not image_paths or len(image_paths) < 2:
             raise ValueError("Focus stacking requires at least 2 image paths.")
 
@@ -93,20 +105,19 @@ class FocusStacker:
         # 1. Load images using utility function
         images = []
         for i, path in enumerate(image_paths):
-            self._check_stop_requested() # Check before loading
+            self._check_stop_requested()
             print(f"Loading image {i+1}/{len(image_paths)}: {os.path.basename(path)}")
             try:
                 img = utils.load_image(path)
                 images.append(img)
             except Exception as e:
                 print(f"ERROR loading image {path}: {e}")
-                raise # Re-raise critical error
+                raise
 
         # 2. Align images using Pyramid ECC Homography with Masking
-        self._check_stop_requested() # Check before alignment
+        self._check_stop_requested()
         print(f"\nAligning images using {self.align_method_desc}...")
         try:
-            # Pass pyramid levels and gradient threshold parameters
             aligned_images = alignment.align_images(
                 images,
                 num_pyramid_levels=self.num_pyramid_levels,
@@ -116,43 +127,45 @@ class FocusStacker:
         except Exception as e:
             if not isinstance(e, StackingCancelledException):
                 print(f"ERROR during image alignment: {e}")
-            raise # Re-raise
+            raise
 
         # 3. Calculate focus measures using Laplacian Variance Map
         print(f"\nCalculating focus measures using {self.focus_measure_method_desc}...")
         focus_maps = []
+        normalize_focus_maps = self.blend_method != 'direct_map'
         for i, img in enumerate(aligned_images):
-            self._check_stop_requested() # Check before calculating focus for each image
+            self._check_stop_requested()
             print(f"Calculating focus for image {i+1}/{len(aligned_images)}")
             try:
                 img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-                focus_map = focus_measure.measure_laplacian_variance_map(img_gray, window_size=self.focus_window_size)
+                focus_map = focus_measure.measure_laplacian_variance_map(
+                    img_gray,
+                    window_size=self.focus_window_size,
+                    normalize=normalize_focus_maps,
+                )
                 focus_maps.append(focus_map.astype(np.float32))
             except Exception as e:
                  if not isinstance(e, StackingCancelledException):
                     print(f"ERROR calculating focus measure for image {i+1}: {e}")
-                 raise # Re-raise
+                 raise
         print("Focus measure calculation complete.")
 
         # 4. Determine sharpest indices (needed for direct map blending)
-        self._check_stop_requested() # Check before index calculation
+        self._check_stop_requested()
         sharpest_indices = None
         if self.blend_method == 'direct_map':
             print("\nCalculating sharpest image indices...")
             if focus_maps:
-                # Stack focus maps along a new axis (axis=0)
                 focus_maps_stack = np.stack(focus_maps, axis=0)
-                # Find the index of the maximum focus value along the stack axis
-                sharpest_indices = np.argmax(focus_maps_stack, axis=0).astype(np.uint16) # Use uint16 for indices
+                sharpest_indices = np.argmax(focus_maps_stack, axis=0).astype(np.uint16)
                 print("Sharpest indices calculated.")
             else:
                 print("Warning: No focus maps available to calculate sharpest indices.")
-                # Handle error or fallback? For now, raise error if needed for direct map
                 raise ValueError("Cannot perform direct map blending without focus maps.")
 
 
         # 5. Blend images using the selected method
-        self._check_stop_requested() # Check before blending
+        self._check_stop_requested()
         print(f"\nBlending images using {self.blend_method_desc}...")
         try:
             if self.blend_method == 'weighted':
@@ -160,46 +173,42 @@ class FocusStacker:
             elif self.blend_method == 'direct_map':
                 if sharpest_indices is None:
                       raise ValueError("Sharpest indices map is required for direct map blending but was not calculated.")
-                # We need to implement blend_direct_map in blending.py
                 blended_image = blending.blend_direct_map(aligned_images, sharpest_indices)
             else:
-                # Should not happen due to check in __init__, but good practice
                 raise ValueError(f"Unsupported blend method: {self.blend_method}")
 
             print("Blending complete.")
         except Exception as e:
             if not isinstance(e, StackingCancelledException):
                 print(f"ERROR during image blending: {e}")
-            raise # Re-raise
+            raise
 
         # 6. Apply Sharpening (if strength > 0)
-        self._check_stop_requested() # Check before sharpening
+        self._check_stop_requested()
         if self.sharpen_strength > 0:
             try:
-                final_result = postprocessing.apply_unsharp_mask(blended_image, strength=self.sharpen_strength)
+                final_result = apply_unsharp_mask(blended_image, strength=self.sharpen_strength)
             except Exception as e:
                  if not isinstance(e, StackingCancelledException):
                     print(f"ERROR during sharpening: {e}. Returning blended image without sharpening.")
-                 final_result = blended_image # Fallback to blended result
+                 final_result = blended_image
         else:
             print("\nSkipping sharpening.")
-            final_result = blended_image # No sharpening applied
+            final_result = blended_image
 
         # 7. Color space conversion (if needed) using utility function
-        self._check_stop_requested() # Check before final conversion
+        self._check_stop_requested()
         if color_space != 'sRGB':
             try:
                 final_result = utils.convert_color_space(final_result, target_space=color_space, source_space='sRGB')
             except Exception as e:
                  if not isinstance(e, StackingCancelledException):
                     print(f"ERROR during final color space conversion: {e}")
-                 raise # Re-raise
+                 raise
 
-        self._check_stop_requested() # Final check before returning
+        self._check_stop_requested()
         print("\n--- Stack processing complete! ---")
         return final_result
-
-    # --- Public methods for saving and splitting (using utils) ---
 
     def save_image(self, img, path, format='JPEG', quality=95, color_space='sRGB'):
         """Saves the image using the utility function."""
@@ -208,6 +217,3 @@ class FocusStacker:
     def split_into_stacks(self, image_paths, stack_size=0):
         """Splits image paths into stacks using the utility function."""
         return utils.split_into_stacks(image_paths, stack_size=stack_size)
-
-    # --- Removed methods that were moved to other modules ---
-    # (Removed methods are now handled in respective modules)

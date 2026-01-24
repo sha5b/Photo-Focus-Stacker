@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+
+# Context: Convenience launcher script for Photo Focus Stacker
+# Purpose: Allow running the GUI via `python photostacker` (no .py extension) and `uv run python photostacker`.
+# Notes: Delegates to the official console entry point in `src.cli`.
+
+from src.cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

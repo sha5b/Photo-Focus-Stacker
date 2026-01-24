@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# Context: Core utility functions for Photo Focus Stacker
+# Purpose: Provide shared helpers for image I/O and color conversion used by the stacking pipeline.
+# Notes: Used by `src.core.focus_stacker` and the UI for saving output.
+
 import cv2
 import numpy as np
 import os

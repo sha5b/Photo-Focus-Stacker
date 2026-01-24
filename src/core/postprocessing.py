@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# Context: Post-processing routines for Photo Focus Stacker
+# Purpose: Apply optional final enhancements (e.g., sharpening) after stacking.
+# Notes: Called by `src.core.focus_stacker.FocusStacker`.
+
 import cv2
 import numpy as np
 

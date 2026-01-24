@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# Context: Image alignment routines for Photo Focus Stacker
+# Purpose: Align all images in a stack to the first image using Pyramid ECC (homography) with an edge-based mask.
+# Notes: Called by `src.core.focus_stacker.FocusStacker` before focus measurement and blending.
+
 import cv2
 import numpy as np
 import os
@@ -14,6 +18,23 @@ def _build_gaussian_pyramid(img, levels):
             break
         pyramid.append(img)
     return pyramid
+
+
+def _scale_homography_for_finer_level(warp_matrix, scale_factor=2.0):
+    """Scales a homography warp matrix when moving from coarser to finer pyramid levels."""
+    s = float(scale_factor)
+    s_inv = 1.0 / s
+
+    scale_up = np.array(
+        [[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+    scale_down = np.array(
+        [[s_inv, 0.0, 0.0], [0.0, s_inv, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    )
+
+    return scale_up @ warp_matrix @ scale_down
 
 # Only alignment method: Pyramid ECC Homography with Masking
 def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5, gradient_threshold=10):
@@ -117,7 +138,7 @@ def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
 
                 # Scale warp matrix from previous level if not the smallest level
                 if level < actual_levels - 1:
-                    pass # Using the matrix from finer level directly as initial guess for Homography
+                    warp_matrix = _scale_homography_for_finer_level(warp_matrix, scale_factor=2.0)
 
                 # Run ECC algorithm for the current level, potentially with mask
                 try:
