@@ -55,7 +55,7 @@ class FocusStacker:
         self.align_method_desc = f'Pyramid ECC Homography ({num_pyramid_levels} levels, Masked)'
         self.focus_measure_method_desc = f'Laplacian Variance Map (window={focus_window_size})'
 
-        if blend_method not in ['weighted', 'direct_map', 'laplacian_pyramid', 'guided_weighted']:
+        if blend_method not in ['weighted', 'direct_map', 'laplacian_pyramid', 'guided_weighted', 'luma_weighted_chroma_pick']:
             print(f"Warning: Invalid blend_method '{blend_method}'. Defaulting to 'weighted'.")
             self.blend_method = 'weighted'
         else:
@@ -66,8 +66,10 @@ class FocusStacker:
             self.blend_method_desc = 'Direct Map Selection'
         elif self.blend_method == 'laplacian_pyramid':
             self.blend_method_desc = 'Laplacian Pyramid Fusion'
-        else:
+        elif self.blend_method == 'guided_weighted':
             self.blend_method_desc = 'Guided Weighted (Edge-Aware)'
+        else:
+            self.blend_method_desc = 'Luma Weighted + Chroma Pick (MFF)'
 
         self.focus_window_size = focus_window_size
         self.sharpen_strength = sharpen_strength
@@ -91,6 +93,35 @@ class FocusStacker:
         if self._stop_requested:
             print("Stop request detected during processing.")
             raise StackingCancelledException("Stacking process cancelled by user.")
+
+    def _compute_focus_map(self, img_rgb_f32: np.ndarray) -> np.ndarray:
+        h, w = img_rgb_f32.shape[:2]
+        max_dim = int(max(h, w))
+
+        img_gray = cv2.cvtColor((img_rgb_f32 * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+
+        target_max_dim = 1200
+        if max_dim > target_max_dim:
+            scale = float(target_max_dim) / float(max_dim)
+            new_w = max(int(round(w * scale)), 2)
+            new_h = max(int(round(h * scale)), 2)
+            img_gray_small = cv2.resize(img_gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            window_small = int(max(3, round(self.focus_window_size * scale)))
+            if window_small % 2 == 0:
+                window_small += 1
+            focus_small = focus_measure.measure_laplacian_variance_map(
+                img_gray_small,
+                window_size=window_small,
+                normalize=False,
+            ).astype(np.float32)
+            focus_map = cv2.resize(focus_small, (w, h), interpolation=cv2.INTER_LINEAR)
+            return focus_map.astype(np.float32)
+
+        return focus_measure.measure_laplacian_variance_map(
+            img_gray,
+            window_size=self.focus_window_size,
+            normalize=False,
+        ).astype(np.float32)
 
     def process_stack(self, image_paths, color_space='sRGB'):
         """
@@ -139,18 +170,11 @@ class FocusStacker:
         # 3. Calculate focus measures using Laplacian Variance Map
         print(f"\nCalculating focus measures using {self.focus_measure_method_desc}...")
         focus_maps = []
-        normalize_focus_maps = False
         for i, img in enumerate(aligned_images):
             self._check_stop_requested()
             print(f"Calculating focus for image {i+1}/{len(aligned_images)}")
             try:
-                img_gray = cv2.cvtColor((img * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-                focus_map = focus_measure.measure_laplacian_variance_map(
-                    img_gray,
-                    window_size=self.focus_window_size,
-                    normalize=normalize_focus_maps,
-                )
-                focus_maps.append(focus_map.astype(np.float32))
+                focus_maps.append(self._compute_focus_map(img))
             except Exception as e:
                  if not isinstance(e, StackingCancelledException):
                     print(f"ERROR calculating focus measure for image {i+1}: {e}")
@@ -189,6 +213,8 @@ class FocusStacker:
                 blended_image = blending.blend_direct_map(aligned_images, sharpest_indices, focus_maps=direct_map_focus_maps)
             elif self.blend_method == 'guided_weighted':
                 blended_image = blending.blend_guided_weighted(aligned_images, focus_maps)
+            elif self.blend_method == 'luma_weighted_chroma_pick':
+                blended_image = blending.blend_luma_weighted_chroma_pick(aligned_images, focus_maps)
             elif self.blend_method == 'laplacian_pyramid':
                 blended_image = blending.blend_laplacian_pyramid(
                     aligned_images,

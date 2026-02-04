@@ -26,14 +26,14 @@ def measure_laplacian_variance_map(img_gray, window_size=7, normalize=True): # D
     # Ensure window size is odd
     window_size = window_size if window_size % 2 != 0 else window_size + 1
 
-    # Calculate Laplacian (use CV_64F for potentially negative values)
-    laplacian = cv2.Laplacian(img_gray_uint8, cv2.CV_64F, ksize=3) # ksize=3 is common for focus maps
+    # Calculate Laplacian (float32 is sufficient and faster than float64 for this use case)
+    laplacian = cv2.Laplacian(img_gray_uint8, cv2.CV_32F, ksize=3) # ksize=3 is common for focus maps
 
     # Calculate local mean of Laplacian using a box filter (efficient)
     mean = cv2.boxFilter(laplacian, -1, (window_size, window_size), normalize=True, borderType=cv2.BORDER_REFLECT)
 
     # Calculate local mean of squared Laplacian
-    laplacian_sq = laplacian**2
+    laplacian_sq = cv2.multiply(laplacian, laplacian)
     mean_sq = cv2.boxFilter(laplacian_sq, -1, (window_size, window_size), normalize=True, borderType=cv2.BORDER_REFLECT)
 
     # Calculate local variance: variance = E[X^2] - (E[X])^2

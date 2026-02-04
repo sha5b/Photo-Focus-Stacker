@@ -187,7 +187,13 @@ class MainWindow(QMainWindow):
 
         self.blend_label = QLabel("Blending Method:")
         self.blend_combo = QComboBox()
-        self.blend_combo.addItems(["Weighted Blending", "Direct Map Selection", "Laplacian Pyramid Fusion", "Guided Weighted (Edge-Aware)"])
+        self.blend_combo.addItems([
+            "Weighted Blending",
+            "Direct Map Selection",
+            "Laplacian Pyramid Fusion",
+            "Guided Weighted (Edge-Aware)",
+            "Luma Weighted + Chroma Pick (MFF)",
+        ])
         self.blend_combo.currentIndexChanged.connect(self._on_stacker_changed)
         grid.addWidget(self.blend_label, row, 0)
         grid.addWidget(self.blend_combo, row, 1)
@@ -298,6 +304,8 @@ class MainWindow(QMainWindow):
             blend_method = "laplacian_pyramid"
         elif blend_index == 3:
             blend_method = "guided_weighted"
+        elif blend_index == 4:
+            blend_method = "luma_weighted_chroma_pick"
         else:
             blend_method = "weighted"
 
@@ -362,6 +370,8 @@ class MainWindow(QMainWindow):
             blend_index = 2
         elif settings.blend_method == "guided_weighted":
             blend_index = 3
+        elif settings.blend_method == "luma_weighted_chroma_pick":
+            blend_index = 4
         else:
             blend_index = 0
         self.blend_combo.setCurrentIndex(blend_index)

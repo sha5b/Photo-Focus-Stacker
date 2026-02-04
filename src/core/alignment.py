@@ -156,7 +156,7 @@ def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
                 continue
 
             # Warp the original COLOR image using the final transformation matrix
-            aligned_img = cv2.warpPerspective(img_color, warp_matrix, (w_full, h_full), flags=cv2.INTER_LANCZOS4 + cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REFLECT)
+            aligned_img = cv2.warpPerspective(img_color, warp_matrix, (w_full, h_full), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REFLECT)
 
             aligned_color.append(aligned_img.astype(np.float32)) # Ensure output is float32
             print(f"  Aligned image {i+1} using Pyramid ECC.")

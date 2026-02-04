@@ -129,6 +129,31 @@ def blend_guided_weighted(aligned_images, focus_maps):
     weights_sum = np.sum(weights_stack, axis=0)
     weights_norm = weights_stack / (weights_sum + epsilon)
 
+    ref_gray = cv2.cvtColor((valid_images[0] * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    if hasattr(cv2, "ximgproc") and hasattr(cv2.ximgproc, "guidedFilter"):
+        print("  Refining weights (edge-aware)...")
+        radius = int(max(4, min(12, round(min(h, w) / 300.0))))
+        eps = 1e-3
+        refined = []
+        for k in range(weights_norm.shape[0]):
+            refined_k = cv2.ximgproc.guidedFilter(
+                guide=ref_gray,
+                src=weights_norm[k, ..., 0].astype(np.float32),
+                radius=radius,
+                eps=float(eps),
+            )
+            refined.append(np.maximum(refined_k, 0.0))
+        refined_stack = np.stack(refined, axis=0).astype(np.float32)
+        refined_sum = np.sum(refined_stack, axis=0)
+        weights_norm = (refined_stack / (refined_sum + epsilon))[..., np.newaxis]
+    else:
+        refined = []
+        for k in range(weights_norm.shape[0]):
+            refined.append(cv2.GaussianBlur(weights_norm[k, ..., 0].astype(np.float32), (0, 0), sigmaX=1.0, sigmaY=1.0, borderType=cv2.BORDER_REFLECT))
+        refined_stack = np.stack(refined, axis=0).astype(np.float32)
+        refined_sum = np.sum(refined_stack, axis=0)
+        weights_norm = (refined_stack / (refined_sum + epsilon))[..., np.newaxis]
+
     guided_list = []
     for k in range(weights_norm.shape[0]):
         guided = _edge_aware_smooth_weight_map(ref_gray, weights_norm[k], radius=radius, eps=eps)
@@ -142,6 +167,108 @@ def blend_guided_weighted(aligned_images, focus_maps):
     result = np.sum(image_stack * guided_norm[..., np.newaxis], axis=0)
     result = np.clip(result.astype(np.float32), 0.0, 1.0)
     print("Guided weighted blending complete.")
+    return result
+
+
+def blend_luma_weighted_chroma_pick(aligned_images, focus_maps):
+    print("\nBlending images using luma weighted + chroma pick (MFF)...")
+    if aligned_images is None or focus_maps is None:
+        raise ValueError("Invalid input: aligned_images and focus_maps must be provided.")
+    if len(aligned_images) == 0 or len(focus_maps) == 0 or len(aligned_images) != len(focus_maps):
+        raise ValueError("Invalid input: aligned_images and focus_maps must be non-empty and have the same length.")
+
+    h, w = aligned_images[0].shape[:2]
+    for i, img in enumerate(aligned_images):
+        if img is None or img.shape[:2] != (h, w):
+            raise ValueError(f"Image {i} has shape {None if img is None else img.shape[:2]}, expected {(h, w)}")
+
+    weight_maps, valid_images = _compute_weight_maps(aligned_images, focus_maps)
+    if not weight_maps:
+        raise ValueError("No valid weight maps were produced for blending.")
+
+    epsilon = 1e-10
+    weights_stack = np.stack(weight_maps, axis=0).astype(np.float32)
+    weights_stack = np.maximum(weights_stack, 0.0) + epsilon
+    gamma = 3.0
+    weights_stack = np.power(weights_stack, gamma)
+    weights_sum = np.sum(weights_stack, axis=0)
+    weights_norm = weights_stack / (weights_sum + epsilon)
+
+    print("  Converting images to YCrCb...")
+    y_list = []
+    cr_list = []
+    cb_list = []
+    for img in valid_images:
+        rgb8 = np.clip(img * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+        ycrcb = cv2.cvtColor(rgb8, cv2.COLOR_RGB2YCrCb)
+        y_list.append(ycrcb[..., 0].astype(np.float32) / 255.0)
+        cr_list.append(ycrcb[..., 1].astype(np.uint8))
+        cb_list.append(ycrcb[..., 2].astype(np.uint8))
+
+    print("  Fusing luminance...")
+    y_fused = np.zeros((h, w), dtype=np.float32)
+    for k in range(len(y_list)):
+        y_fused += y_list[k].astype(np.float32) * weights_norm[k, ..., 0].astype(np.float32)
+    y_fused = np.clip(y_fused, 0.0, 1.0)
+
+    print("  Selecting chroma sources...")
+    best_val = np.full((h, w), -np.inf, dtype=np.float32)
+    best_idx = np.zeros((h, w), dtype=np.int32)
+    second_val = np.full((h, w), -np.inf, dtype=np.float32)
+    second_idx = np.zeros((h, w), dtype=np.int32)
+    for i, fm in enumerate(focus_maps):
+        fm_smooth = cv2.GaussianBlur(fm.astype(np.float32), (0, 0), sigmaX=1.0, sigmaY=1.0, borderType=cv2.BORDER_REFLECT)
+        is_best = fm_smooth > best_val
+        second_val = np.where(is_best, best_val, second_val)
+        second_idx = np.where(is_best, best_idx, second_idx)
+        best_val = np.where(is_best, fm_smooth, best_val)
+        best_idx = np.where(is_best, int(i), best_idx)
+
+        is_second = (~is_best) & (fm_smooth > second_val)
+        second_val = np.where(is_second, fm_smooth, second_val)
+        second_idx = np.where(is_second, int(i), second_idx)
+
+    best_idx = best_idx.astype(np.int32)
+    second_idx = second_idx.astype(np.int32)
+    if len(valid_images) > 1:
+        best_idx = _refine_indices_majority(best_idx, num_labels=len(valid_images), window_size=3, iterations=2)
+        second_idx = _refine_indices_majority(second_idx, num_labels=len(valid_images), window_size=3, iterations=1)
+    best_idx = np.clip(best_idx, 0, len(valid_images) - 1).astype(np.int32)
+    second_idx = np.clip(second_idx, 0, len(valid_images) - 1).astype(np.int32)
+
+    cr_stack = np.stack(cr_list, axis=0)
+    cb_stack = np.stack(cb_list, axis=0)
+    row_idx = np.arange(h)[:, np.newaxis]
+    col_idx = np.arange(w)[np.newaxis, :]
+    cr_best = cr_stack[best_idx, row_idx, col_idx].astype(np.float32)
+    cb_best = cb_stack[best_idx, row_idx, col_idx].astype(np.float32)
+    cr_second = cr_stack[second_idx, row_idx, col_idx].astype(np.float32)
+    cb_second = cb_stack[second_idx, row_idx, col_idx].astype(np.float32)
+
+    best_val = np.maximum(best_val, 0.0)
+    second_val = np.maximum(second_val, 0.0)
+    gamma_chroma = 4.0
+    best_pow = np.power(best_val + epsilon, gamma_chroma)
+    second_pow = np.power(second_val + epsilon, gamma_chroma)
+    w_focus = best_pow / (best_pow + second_pow + epsilon)
+    confidence = (best_val - second_val) / (best_val + second_val + epsilon)
+    ambiguous = confidence < 0.25
+    if np.any(ambiguous):
+        w_smooth = cv2.GaussianBlur(w_focus.astype(np.float32), (0, 0), sigmaX=1.0, sigmaY=1.0, borderType=cv2.BORDER_REFLECT)
+        w_focus = np.where(ambiguous, w_smooth, w_focus)
+
+    w_ch = w_focus.astype(np.float32)[..., np.newaxis]
+    cr = (cr_best * w_ch[..., 0] + cr_second * (1.0 - w_ch[..., 0])).astype(np.float32)
+    cb = (cb_best * w_ch[..., 0] + cb_second * (1.0 - w_ch[..., 0])).astype(np.float32)
+    cr = np.clip(cr + 0.5, 0.0, 255.0).astype(np.uint8)
+    cb = np.clip(cb + 0.5, 0.0, 255.0).astype(np.uint8)
+
+    y_u8 = np.clip(y_fused * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+    ycrcb_fused = np.stack([y_u8, cr, cb], axis=2)
+    rgb_fused_u8 = cv2.cvtColor(ycrcb_fused, cv2.COLOR_YCrCb2RGB)
+    result = rgb_fused_u8.astype(np.float32) / 255.0
+    result = np.clip(result.astype(np.float32), 0.0, 1.0)
+    print("Luma/chroma fusion complete.")
     return result
 
 

@@ -128,6 +128,7 @@ def recommend_stacker_settings(image_paths: List[str], preferred_blend_method: O
         "direct_map",
         "laplacian_pyramid",
         "guided_weighted",
+        "luma_weighted_chroma_pick",
     ):
         blend_method = preferred_blend_method
 
@@ -142,6 +143,9 @@ def recommend_stacker_settings(image_paths: List[str], preferred_blend_method: O
         focus_window_size = max(int(focus_window_size), 7)
 
     if blend_method == "guided_weighted" and max_dim >= 3200:
+        focus_window_size = max(int(focus_window_size), 7)
+
+    if blend_method == "luma_weighted_chroma_pick" and max_dim >= 3200:
         focus_window_size = max(int(focus_window_size), 7)
 
     settings = StackerSettings(
