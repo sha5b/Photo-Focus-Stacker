@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -31,6 +32,7 @@ from src.config.settings_store import AppSettings, load_settings, save_settings
 from src.config.stack_detection_settings import StackDetectionSettings
 from src.config.stacking_settings import StackerSettings
 from src.core import utils
+from src.services.auto_tune import recommend_stacker_settings
 from src.services.stack_detection import detect_stacks
 from src.ui.stacking_worker import FocusStackingWorker
 
@@ -143,6 +145,11 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.preset_combo, row, 1)
         row += 1
 
+        self.auto_tune_checkbox = QCheckBox("Auto Tune")
+        self.auto_tune_checkbox.stateChanged.connect(self._on_auto_tune_changed)
+        grid.addWidget(self.auto_tune_checkbox, row, 1)
+        row += 1
+
         self.pyramid_label = QLabel("Alignment Pyramid Levels:")
         self.pyramid_spinbox = QSpinBox()
         self.pyramid_spinbox.setRange(1, 6)
@@ -180,7 +187,7 @@ class MainWindow(QMainWindow):
 
         self.blend_label = QLabel("Blending Method:")
         self.blend_combo = QComboBox()
-        self.blend_combo.addItems(["Weighted Blending", "Direct Map Selection"])
+        self.blend_combo.addItems(["Weighted Blending", "Direct Map Selection", "Laplacian Pyramid Fusion", "Guided Weighted (Edge-Aware)"])
         self.blend_combo.currentIndexChanged.connect(self._on_stacker_changed)
         grid.addWidget(self.blend_label, row, 0)
         grid.addWidget(self.blend_combo, row, 1)
@@ -251,6 +258,10 @@ class MainWindow(QMainWindow):
 
         self._set_stacker_controls_from_settings(stacker)
 
+        self.auto_tune_checkbox.blockSignals(True)
+        self.auto_tune_checkbox.setChecked(bool(getattr(self._app_settings, "auto_tune_enabled", False)))
+        self.auto_tune_checkbox.blockSignals(False)
+
         self.stack_mode_combo.blockSignals(True)
         self.fixed_size_spin.blockSignals(True)
         self.regex_edit.blockSignals(True)
@@ -280,20 +291,43 @@ class MainWindow(QMainWindow):
         self.regex_edit.setEnabled(is_regex)
 
     def _on_stacker_changed(self) -> None:
+        blend_index = int(self.blend_combo.currentIndex())
+        if blend_index == 1:
+            blend_method = "direct_map"
+        elif blend_index == 2:
+            blend_method = "laplacian_pyramid"
+        elif blend_index == 3:
+            blend_method = "guided_weighted"
+        else:
+            blend_method = "weighted"
+
         current = StackerSettings(
             focus_window_size=self.focus_window_spinbox.value(),
             sharpen_strength=float(self.sharpen_spinbox.value()),
             num_pyramid_levels=self.pyramid_spinbox.value(),
             gradient_threshold=self.gradient_spinbox.value(),
-            blend_method="direct_map" if self.blend_combo.currentIndex() == 1 else "weighted",
+            blend_method=blend_method,
         ).validated()
 
         self._app_settings = AppSettings(
             stacker=current,
             stack_detection=self._app_settings.stack_detection.validated(),
             output=self._app_settings.output.validated(),
+            last_input_dir=self._app_settings.last_input_dir,
+            auto_tune_enabled=self._app_settings.auto_tune_enabled,
         )
         self._set_preset_from_settings(current)
+        self._save_settings_best_effort()
+
+    def _on_auto_tune_changed(self) -> None:
+        enabled = bool(self.auto_tune_checkbox.isChecked())
+        self._app_settings = AppSettings(
+            stacker=self._app_settings.stacker.validated(),
+            stack_detection=self._app_settings.stack_detection.validated(),
+            output=self._app_settings.output.validated(),
+            last_input_dir=self._app_settings.last_input_dir,
+            auto_tune_enabled=enabled,
+        )
         self._save_settings_best_effort()
 
     def _on_preset_changed(self) -> None:
@@ -322,7 +356,15 @@ class MainWindow(QMainWindow):
         self.gradient_spinbox.setValue(settings.gradient_threshold)
         self.focus_window_spinbox.setValue(settings.focus_window_size)
         self.sharpen_spinbox.setValue(settings.sharpen_strength)
-        self.blend_combo.setCurrentIndex(1 if settings.blend_method == "direct_map" else 0)
+        if settings.blend_method == "direct_map":
+            blend_index = 1
+        elif settings.blend_method == "laplacian_pyramid":
+            blend_index = 2
+        elif settings.blend_method == "guided_weighted":
+            blend_index = 3
+        else:
+            blend_index = 0
+        self.blend_combo.setCurrentIndex(blend_index)
 
         self.pyramid_spinbox.blockSignals(False)
         self.gradient_spinbox.blockSignals(False)
@@ -342,6 +384,8 @@ class MainWindow(QMainWindow):
             stacker=self._app_settings.stacker.validated(),
             stack_detection=detection,
             output=self._app_settings.output.validated(),
+            last_input_dir=self._app_settings.last_input_dir,
+            auto_tune_enabled=self._app_settings.auto_tune_enabled,
         )
 
         self._sync_stack_detection_control_enabled_state()
@@ -366,6 +410,8 @@ class MainWindow(QMainWindow):
             stacker=self._app_settings.stacker.validated(),
             stack_detection=self._app_settings.stack_detection.validated(),
             output=output,
+            last_input_dir=self._app_settings.last_input_dir,
+            auto_tune_enabled=self._app_settings.auto_tune_enabled,
         )
         self._save_settings_best_effort()
 
@@ -378,6 +424,10 @@ class MainWindow(QMainWindow):
         file_dialog.setFileMode(QFileDialog.ExistingFiles)
         file_dialog.setNameFilter("Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp *.webp)")
 
+        last_dir = str(getattr(self._app_settings, "last_input_dir", "") or "")
+        if last_dir and os.path.isdir(last_dir):
+            file_dialog.setDirectory(last_dir)
+
         if not file_dialog.exec_():
             return
 
@@ -385,6 +435,15 @@ class MainWindow(QMainWindow):
         if not self._image_paths:
             self.status_label.setText("No images selected.")
             return
+
+        try:
+            first_path = self._image_paths[0]
+            first_dir = os.path.dirname(first_path)
+            if first_dir and os.path.isdir(first_dir):
+                self._app_settings.last_input_dir = first_dir
+                self._save_settings_best_effort()
+        except Exception:
+            pass
 
         detection = self._app_settings.stack_detection.validated()
         try:
@@ -401,6 +460,24 @@ class MainWindow(QMainWindow):
 
         if not self._stack_items:
             self._stack_items = [("stack", sorted(self._image_paths))]
+
+        if bool(getattr(self._app_settings, "auto_tune_enabled", False)):
+            try:
+                sample_paths = self._stack_items[0][1] if self._stack_items and self._stack_items[0][1] else self._image_paths
+                preferred_blend = self._app_settings.stacker.validated().blend_method
+                tuned_settings, _report = recommend_stacker_settings(sample_paths, preferred_blend_method=preferred_blend)
+                self._set_stacker_controls_from_settings(tuned_settings)
+                self._app_settings = AppSettings(
+                    stacker=tuned_settings,
+                    stack_detection=self._app_settings.stack_detection.validated(),
+                    output=self._app_settings.output.validated(),
+                    last_input_dir=self._app_settings.last_input_dir,
+                    auto_tune_enabled=self._app_settings.auto_tune_enabled,
+                )
+                self._set_preset_from_settings(tuned_settings)
+                self._save_settings_best_effort()
+            except Exception:
+                pass
 
         num_images_in_stacks = sum(len(item[1]) for item in self._stack_items)
         self.status_label.setText(f"Loaded {num_images_in_stacks} images in {len(self._stack_items)} stacks.")

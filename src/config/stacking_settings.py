@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Literal
 
-BlendMethod = Literal["weighted", "direct_map"]
+BlendMethod = Literal["weighted", "direct_map", "laplacian_pyramid", "guided_weighted"]
 
 
 @dataclass
@@ -44,7 +44,7 @@ class StackerSettings:
         if sharpen_strength > 3.0:
             sharpen_strength = 3.0
 
-        blend_method: BlendMethod = self.blend_method if self.blend_method in ("weighted", "direct_map") else "weighted"
+        blend_method: BlendMethod = self.blend_method if self.blend_method in ("weighted", "direct_map", "laplacian_pyramid", "guided_weighted") else "weighted"
 
         return StackerSettings(
             focus_window_size=focus_window_size,

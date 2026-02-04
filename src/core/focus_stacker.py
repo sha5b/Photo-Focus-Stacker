@@ -55,12 +55,19 @@ class FocusStacker:
         self.align_method_desc = f'Pyramid ECC Homography ({num_pyramid_levels} levels, Masked)'
         self.focus_measure_method_desc = f'Laplacian Variance Map (window={focus_window_size})'
 
-        if blend_method not in ['weighted', 'direct_map']:
+        if blend_method not in ['weighted', 'direct_map', 'laplacian_pyramid', 'guided_weighted']:
             print(f"Warning: Invalid blend_method '{blend_method}'. Defaulting to 'weighted'.")
             self.blend_method = 'weighted'
         else:
             self.blend_method = blend_method
-        self.blend_method_desc = 'Weighted' if self.blend_method == 'weighted' else 'Direct Map Selection'
+        if self.blend_method == 'weighted':
+            self.blend_method_desc = 'Weighted'
+        elif self.blend_method == 'direct_map':
+            self.blend_method_desc = 'Direct Map Selection'
+        elif self.blend_method == 'laplacian_pyramid':
+            self.blend_method_desc = 'Laplacian Pyramid Fusion'
+        else:
+            self.blend_method_desc = 'Guided Weighted (Edge-Aware)'
 
         self.focus_window_size = focus_window_size
         self.sharpen_strength = sharpen_strength
@@ -132,7 +139,7 @@ class FocusStacker:
         # 3. Calculate focus measures using Laplacian Variance Map
         print(f"\nCalculating focus measures using {self.focus_measure_method_desc}...")
         focus_maps = []
-        normalize_focus_maps = self.blend_method != 'direct_map'
+        normalize_focus_maps = False
         for i, img in enumerate(aligned_images):
             self._check_stop_requested()
             print(f"Calculating focus for image {i+1}/{len(aligned_images)}")
@@ -153,10 +160,16 @@ class FocusStacker:
         # 4. Determine sharpest indices (needed for direct map blending)
         self._check_stop_requested()
         sharpest_indices = None
+        direct_map_focus_maps = None
         if self.blend_method == 'direct_map':
             print("\nCalculating sharpest image indices...")
             if focus_maps:
-                focus_maps_stack = np.stack(focus_maps, axis=0)
+                smoothed_maps = [
+                    cv2.GaussianBlur(fm.astype(np.float32), (0, 0), sigmaX=1.0, sigmaY=1.0, borderType=cv2.BORDER_REFLECT)
+                    for fm in focus_maps
+                ]
+                direct_map_focus_maps = smoothed_maps
+                focus_maps_stack = np.stack(smoothed_maps, axis=0)
                 sharpest_indices = np.argmax(focus_maps_stack, axis=0).astype(np.uint16)
                 print("Sharpest indices calculated.")
             else:
@@ -173,7 +186,15 @@ class FocusStacker:
             elif self.blend_method == 'direct_map':
                 if sharpest_indices is None:
                       raise ValueError("Sharpest indices map is required for direct map blending but was not calculated.")
-                blended_image = blending.blend_direct_map(aligned_images, sharpest_indices)
+                blended_image = blending.blend_direct_map(aligned_images, sharpest_indices, focus_maps=direct_map_focus_maps)
+            elif self.blend_method == 'guided_weighted':
+                blended_image = blending.blend_guided_weighted(aligned_images, focus_maps)
+            elif self.blend_method == 'laplacian_pyramid':
+                blended_image = blending.blend_laplacian_pyramid(
+                    aligned_images,
+                    focus_maps,
+                    num_levels=self.num_pyramid_levels,
+                )
             else:
                 raise ValueError(f"Unsupported blend method: {self.blend_method}")
 

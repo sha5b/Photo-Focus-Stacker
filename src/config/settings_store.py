@@ -21,12 +21,16 @@ class AppSettings:
     stacker: StackerSettings
     stack_detection: StackDetectionSettings
     output: OutputSettings
+    last_input_dir: str = ""
+    auto_tune_enabled: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "stacker": self.stacker.to_dict(),
             "stack_detection": self.stack_detection.to_dict(),
             "output": self.output.to_dict(),
+            "last_input_dir": str(self.last_input_dir or ""),
+            "auto_tune_enabled": bool(self.auto_tune_enabled),
         }
 
     @staticmethod
@@ -34,11 +38,15 @@ class AppSettings:
         stacker_data = data.get("stacker", {}) if isinstance(data, dict) else {}
         detection_data = data.get("stack_detection", {}) if isinstance(data, dict) else {}
         output_data = data.get("output", {}) if isinstance(data, dict) else {}
+        last_input_dir = str(data.get("last_input_dir", "")) if isinstance(data, dict) else ""
+        auto_tune_enabled = bool(data.get("auto_tune_enabled", False)) if isinstance(data, dict) else False
 
         return AppSettings(
             stacker=StackerSettings.from_dict(stacker_data),
             stack_detection=StackDetectionSettings.from_dict(detection_data),
             output=OutputSettings.from_dict(output_data),
+            last_input_dir=last_input_dir,
+            auto_tune_enabled=auto_tune_enabled,
         )
 
 
