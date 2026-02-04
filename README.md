@@ -1,260 +1,248 @@
-# Focus Stacking for Microscopy and Macro Photography
+# Photo Focus Stacker
 
-This focus stacking tool was developed specifically for the [OpenScan](https://openscan.eu) community to enable high-quality focus stacking for photogrammetry and 3D scanning applications. OpenScan is an open-source 3D scanner project that makes professional 3D scanning accessible to everyone.
+Focus stacking GUI for microscopy/macro stacks (developed for the [OpenScan](https://openscan.eu) community).
 
-## Table of Contents
+## Quick start
 
-- [Quick Start Guide](#quick-start-guide)
-  - [Using the GUI](#using-the-gui)
-  - [Tips for Best Results](#tips-for-best-results)
-  - [Parameter Tuning Guide](#parameter-tuning-guide)
-- [Installation](#installation)
-- [Running the Application](#running-the-application)
-- [Advanced Usage (Python API)](#advanced-usage-python-api)
-  - [`FocusStacker` Options (Python API)](#focusstacker-options-python-api)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
-## Quick Start Guide
-
-### Using the GUI
-
-1. Launch the application:
 ```bash
 uv sync
 uv run photostacker
 ```
 
-2. **Load Images:** Click "Load Images" and select the image files.
-3. **Stack Detection:** Choose how images are grouped into stacks:
-    *   `Auto (Recommended)`
-    *   `Legacy (name_123-45)`
-    *   `Common suffix (strip last number)`
-    *   `Fixed stack size`
-    *   `Regex (Advanced)`
-4. **Configure Parameters:** Adjust settings like Alignment Levels, Focus Window, Blending Method, etc. See the **Parameter Tuning Guide** below for details.
-5. **Presets:** Use the preset selector (Fast Preview / Balanced / Best Quality) as a starting point.
-6. **Output Settings:** Set output format and output directory.
-7. **Process:** Click "Process Stack".
+1. Click `Load Images`.
+2. Keep `Stack Detection = Auto` unless your naming needs `Fixed size` or `Regex`.
+3. Optionally enable `Auto Tune`.
+4. Choose:
+   - `Focus Measure`
+   - `Blending Method`
+5. Click `Process Stack`.
 
-### Tips for Best Results
+Settings persist to `%APPDATA%/photo_focus_stacker_settings.json` (Windows).
 
-*   **Stability:** Use a stable setup (tripod, copy stand, scanner) to minimize movement between shots.
-*   **Lighting:** Keep lighting consistent across all images in a stack.
-*   **Settings:** Use manual focus and consistent camera settings (aperture, shutter speed, ISO).
-*   **Overlap:** Ensure sufficient overlap in focus between consecutive images.
-*   **Sequence:** Take enough images to cover the entire depth of field of your subject. Small focus steps are generally better than large ones.
+## Recommended settings
 
-### Parameter Tuning Guide
+### Best overall (quality)
 
-The core algorithms (Pyramid ECC Homography alignment, Laplacian Variance focus measure) are fixed for robustness. You can tune the following parameters in the GUI:
+- **Alignment Pyramid Levels**: `4-5`
+- **Alignment Mask Threshold**: `8-12`
+- **Focus Window Size**: `5-7`
+- **Focus Measure**: `Tenengrad` (good in low-contrast / flat regions)
+- **Blend**: `Guided Weighted (Edge-Aware)` or `Luma Weighted + Chroma Pick (MFF)`
+- **Sharpen**: `0.0` (sharpen later if needed)
 
-*   **Alignment Pyramid Levels:** (Default: 3) Controls the multi-resolution strategy for image alignment. The alignment starts on downscaled images (higher pyramid levels) and refines on progressively larger versions.
-    *   **Increase:** **Improves alignment** for images with larger shifts/rotations. **Increases processing time** significantly. Try `4` or `5` if alignment fails or seems inaccurate.
-    *   **Decrease:** **Speeds up alignment** considerably. May **fail** if images have significant movements. `1` disables the pyramid (fastest, but least robust).
-*   **Alignment Mask Threshold:** (Default: 10) Sets the minimum edge strength required for a pixel to be considered during alignment. Alignment focuses on matching these edge pixels.
-    *   **Increase:** Includes weaker edges (more permissive). Might **help in low-contrast areas** but can be **influenced by noise**. Try `15` or `20`.
-    *   **Decrease:** Focuses only on strong edges (stricter). **Improves robustness against noise** but might **fail if strong edges are lacking**. Try `5` or `8`.
-*   **Focus Window Size:** (Default: 7) The side length (in pixels) of the square window used to calculate local sharpness. Must be odd.
-    *   **Increase:** **Smoother focus map** (less noise) by averaging over a larger area. Can **blur focus transitions** and lose fine detail. Try `9` or `11`.
-    *   **Decrease:** **Finer detail** in focus map, potentially sharper transitions. **More sensitive to noise**. Try `5`. Using `3` is often too noisy.
-*   **Sharpening Strength:** (Default: 0.0) Controls the intensity of an Unsharp Mask filter applied *after* stacking.
-    *   **Increase:** **Enhances apparent sharpness** and contrast. Moderate values: `0.5` to `1.0`. Higher values (> 1.0) often cause **excessive noise and halos**.
-    *   **Decrease:** Reduces sharpening. `0.0` **disables sharpening** (recommended for initial processing).
-*   **Blending Method:** (Default: Weighted Blending) Determines how the final image is assembled from the sharpest parts of the aligned source images.
-    *   `Weighted Blending`: **Smoothly blends** pixels based on focus scores. Generally **fewer artifacts** and handles noisy focus maps better. **Recommended starting point.**
-    *   `Direct Map Selection`: Directly copies the pixel from the single sharpest source image. Can be **maximally sharp** but **prone to noise/artifacts** if the focus map is noisy. Can be slightly faster.
+### Fast preview
 
-**Good Starting Point:**
+- **Alignment Pyramid Levels**: `1-2`
+- **Focus Window Size**: `7`
+- **Focus Measure**: `Laplacian Variance`
+- **Blend**: `Direct Map Selection` (fastest, can artifact)
 
-For most stacks, the default settings are a reasonable starting point:
-*   Pyramid Levels: `3`
-*   Mask Threshold: `10`
-*   Focus Window: `7`
-*   Sharpening: `0.0`
-*   Blending: `Weighted Blending`
+### When results look noisy / haloed
 
-**Example: Settings for Best Quality (Potentially Slower):**
+- Increase **Focus Window Size** (e.g. `9`)
+- Prefer **Guided Weighted** or **MFF** over **Direct Map**
+- Reduce **Sharpen** (keep `0.0` while tuning)
 
-If quality is paramount and processing time is less critical, you might try:
-*   Pyramid Levels: `4` or `5` (Handles larger misalignments more accurately)
-*   Mask Threshold: `8` (Focuses alignment on stronger edges)
-*   Focus Window: `5` (Captures finer focus detail, but check for noise)
-*   Sharpening: `0.0` (Apply sharpening later if needed, starting clean)
-*   Blending: `Weighted Blending` (Generally smoother results)
-*Note: These settings increase processing time, especially the pyramid levels.*
+## Parameter reference (what each setting means)
 
-**Example: Settings for Fastest Speed (Potentially Lower Quality):**
+### Alignment Pyramid Levels
 
-If speed is the main goal (e.g., for quick previews):
-*   Pyramid Levels: `1` (Fastest alignment, assumes minimal image shift)
-*   Mask Threshold: `10` (Default is usually fine for speed)
-*   Focus Window: `7` (Default is a balance)
-*   Sharpening: `0.0` (Sharpening adds time)
-*   Blending: `Direct Map Selection` (May be slightly faster than weighted)
-*Note: Using Pyramid Level 1 may fail if images are not well-aligned initially. Direct Map blending might introduce artifacts.*
+Controls Pyramid ECC alignment from coarse-to-fine.
 
-**Combinations to Watch Out For (Potentially "Bad" Settings):**
+- **Higher (4-6)**
+  - More robust to larger shifts/rotations.
+  - Slower.
+- **Lower (1-2)**
+  - Faster.
+  - Can fail if the stack has motion.
 
-While results depend heavily on the source images, some combinations tend to cause issues:
-*   **Small Focus Window + Direct Map Blending + High Sharpening:** Using a very small `Focus Window Size` (e.g., 3 or 5) can create a noisy focus map. Combining this with `Direct Map Selection` can transfer that noise directly into the output. Adding high `Sharpening Strength` (e.g., > 1.0) will amplify this noise further, likely leading to poor results.
-*   **Very High Mask Threshold:** Setting the `Alignment Mask Threshold` extremely high (e.g., 50+) might prevent the alignment algorithm from finding enough features if the image lacks strong edges, potentially leading to misalignment.
-*   **Pyramid Level 1 with Large Movements:** If your images have significant shifts or rotation between them, using only `1` `Alignment Pyramid Level` (no pyramid) might not be sufficient for accurate alignment.
-*   **Excessive Sharpening:** Regardless of other settings, very high `Sharpening Strength` (e.g., > 1.5) almost always introduces undesirable halos and noise. Apply sharpening cautiously.
+### Alignment Mask Threshold
 
-***The best approach is always to start with the defaults, inspect the output image carefully, and then adjust one parameter at a time based on the specific issues you observe.***
+Controls how many pixels are used by ECC by building a gradient mask from the reference image.
 
----
+- **Lower value (stricter)**
+  - Uses only the strongest edges.
+  - More robust to noise, but can fail if the subject is low-texture.
+- **Higher value (more permissive)**
+  - Includes more pixels (weaker edges).
+  - Can help low-contrast scenes, but can be influenced by noise.
 
-## Installation
+### Focus Window Size
 
-This tool requires Python 3.9+.
+Size of the local window used to aggregate the focus measure (odd numbers only).
 
-1.  **Clone the Repository:**
-    ```bash
-    git clone https://github.com/sha5b/Photo-Focus-Stacker.git
-    cd Photo-Focus-Stacker
-    ```
+- **Smaller (3-5)**
+  - Sharper transitions, more detail.
+  - More sensitive to noise.
+- **Larger (7-11)**
+  - Smoother maps (less speckle).
+  - Can slightly soften fine focus boundaries.
 
-2.  **Install Dependencies (Recommended: uv)**
+### Focus Measure
 
-    ```bash
-    uv sync
-    ```
+- **Laplacian Variance** (`laplacian_var`)
+  - Very common and fast.
+  - Can underperform in flat/homogeneous regions.
+- **Tenengrad** (`tenengrad`)
+  - Uses gradient energy.
+  - Often better in low-contrast regions.
+- **SML** (`sml`)
+  - Sum-modified Laplacian (`|Lx|+|Ly|`).
+  - Often a good alternative to Laplacian variance on textured subjects.
 
-    Optional GPU dependencies:
+### Sharpening Strength
 
-    ```bash
-    uv sync --extra gpu
-    ```
+Unsharp mask applied after blending.
 
-3.  **Install Dependencies (pip - legacy)**
+- **0.0**: recommended while tuning
+- **0.3-0.8**: mild sharpening
+- **> 1.0**: can create halos/noise
 
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Blending Method
 
-## Running the Application
+- **Weighted Blending**
+  - Smooth, stable baseline.
+- **Guided Weighted (Edge-Aware)**
+  - Smooths weights in an edge-aware way (guided filter when available).
+  - Good general-purpose “quality” option.
+- **Direct Map Selection**
+  - Chooses sharpest frame per pixel (plus top-2 confidence blending in ambiguous areas).
+  - Can produce artifacts if focus maps are noisy.
+- **Laplacian Pyramid Fusion**
+  - Multi-scale fusion; helps preserve detail at multiple scales.
+- **Luma Weighted + Chroma Pick (MFF)**
+  - Fuses luminance smoothly and selects/blends chroma from the sharpest frames.
+  - Often reduces color seams/halos.
 
-Once installed, run the GUI using:
+## Best / worst setting combinations
+
+### Best starting points
+
+- **General quality**
+  - Levels `4`
+  - Mask `8-12`
+  - Window `5-7`
+  - Focus `Tenengrad`
+  - Blend `Guided Weighted` or `MFF`
+  - Sharpen `0.0`
+
+- **Low-texture subjects**
+  - Focus `Tenengrad`
+  - Mask threshold slightly higher (more permissive)
+  - Blend `Guided Weighted` or `MFF`
+
+### Common “bad” combos
+
+- **Direct Map + small window (3–5)**
+  - Noisy focus maps turn into pixel-level artifacts.
+
+- **High sharpening + any artifacts**
+  - Sharpening amplifies halos/noise. Tune sharpening last.
+
+- **Very low alignment levels (1) with motion**
+  - Misalignment creates ghosting/blur no blend can fix.
+
+## Methods (what each option does)
+
+### Focus Measure
+
+- **Laplacian Variance**: local variance of Laplacian in a window.
+- **Tenengrad**: local average of gradient energy `(Gx^2 + Gy^2)`.
+- **SML**: sum-modified Laplacian `|Lx| + |Ly|` averaged in a window.
+
+For speed, focus maps are computed on a downscaled grayscale image for large inputs and upsampled back.
+
+### Blending Method
+
+- **Weighted Blending**: soft weights from focus maps.
+- **Guided Weighted (Edge-Aware)**: weight maps are edge-aware smoothed (guided/bilateral) before blending.
+- **Direct Map Selection**: picks the sharpest source per pixel, with a top-2 confidence blend in ambiguous regions.
+- **Laplacian Pyramid Fusion**: multi-scale fusion using Laplacian pyramids.
+- **Luma Weighted + Chroma Pick (MFF)**: fuse luminance smoothly and select/blend chroma from the sharpest frames (reduces color seams).
+
+### Performance note (caching)
+
+Alignment (ECC) is the slowest stage. The stacker caches `aligned_images` + `focus_maps` (bounded) so rerunning the same stack with the same alignment/focus settings can reuse intermediates.
+
+## The math / pipeline (high level)
+
+For each stack:
+
+1. **Load** RGB images as float32 `[0,1]`.
+2. **Align** each frame to the first frame using pyramid ECC.
+
+   We estimate a transform by maximizing the Enhanced Correlation Coefficient (ECC) objective between the reference and moving image (at multiple resolutions). A gradient-based mask is used to emphasize informative pixels.
+
+   - Primary model: homography `H` (3x3)
+   - Fallback model: affine (2x3) if homography ECC fails
+
+3. **Compute a focus map** per aligned frame.
+
+   Each focus measure returns a non-negative field `f_i(x)`:
+
+   - Laplacian variance: `Var(ΔI)` in a local window
+   - Tenengrad: local mean of `Gx^2 + Gy^2`
+   - SML: local mean of `|Lx| + |Ly|`
+
+4. **Convert focus maps to weights**.
+
+   For weight-based blends we use a stable per-pixel softmax:
+
+   `w_i(x) = exp(beta * f_i(x)) / sum_j exp(beta * f_j(x))`
+
+   This avoids hard seams and keeps weights normalized.
+
+5. **Blend** using the selected method.
+
+   - Weighted / Guided Weighted: `I(x) = sum_i w_i(x) * I_i(x)`
+   - Direct Map: choose argmax focus index (with top-2 confidence mixing in ambiguous areas)
+   - Laplacian Pyramid: multi-scale fusion of Laplacian pyramids with Gaussian pyramids of weights
+   - MFF (luma/chroma): fuse luminance with weights and pick/blend chroma from sharpest frames
+
+6. Optional **unsharp mask** sharpening.
+
+## Install
+
+Python 3.9+.
+
 ```bash
+git clone https://github.com/sha5b/Photo-Focus-Stacker.git
+cd Photo-Focus-Stacker
+uv sync
 uv run photostacker
 ```
 
-Alternative launch options:
-
-```bash
-uv run python main.py
-```
-
-```bash
-uv run python photostacker
-```
-
-Settings are persisted to a JSON file under `%APPDATA%` on Windows.
-
----
-
-## Advanced Usage (Python API)
-
-You can integrate the focus stacking logic into your own Python scripts.
+## Python API
 
 ```python
-# Ensure you are in the project's root directory or have src in your Python path
 from src.core.focus_stacker import FocusStacker
-from src.core.utils import save_image
-from src.services.stack_detection import detect_stacks
-import glob
-import os
 
-# --- Example 1: Process a single stack with default settings ---
-print("Processing single stack...")
-stacker_defaults = FocusStacker() # Uses default parameters
-image_files = sorted(glob.glob('path/to/your/stack/*.jpg')) # Get your image files
-if image_files:
-    result_default = stacker_defaults.process_stack(image_files)
-    save_image(result_default, 'results/output_default.jpg')
-    print("Saved default result.")
-else:
-    print("No images found for single stack example.")
-
-
-# --- Example 2: Process multiple stacks with custom settings ---
-print("\nProcessing multiple stacks with custom settings...")
-# Example using the 'direct_map' blending and different parameters
-stacker_custom = FocusStacker(
-    focus_window_size=5,      # Smaller window for potentially finer focus map
-    sharpen_strength=0.8,     # Apply some sharpening
-    num_pyramid_levels=4,     # More pyramid levels for alignment
-    gradient_threshold=8,     # Stricter alignment mask
-    blend_method='direct_map' # Use the new direct map blending
+stacker = FocusStacker(
+    num_pyramid_levels=4,
+    gradient_threshold=10,
+    focus_window_size=7,
+    focus_measure_method="tenengrad",
+    blend_method="guided_weighted",
+    sharpen_strength=0.0,
 )
 
-all_images = sorted(glob.glob('path/to/all/images/*.tif')) # Get all images
-if all_images:
-    # Auto-detect stacks (uses a legacy-compatible pattern and a common suffix fallback)
-    stacks = detect_stacks(all_images, mode="auto")
-
-    if not stacks:
-        print("Could not detect stacks, treating all images as one.")
-        stacks = [all_images] # Fallback to single stack
-
-    output_dir = 'results/custom_stacks'
-    os.makedirs(output_dir, exist_ok=True)
-
-    for i, (stack_name, stack_paths) in enumerate(stacks, start=1):
-        print(f"\nProcessing custom stack {i}/{len(stacks)}: {stack_name}")
-        if not stack_paths:
-            print(f"Skipping empty stack {i}.")
-            continue
-
-        result_custom = stacker_custom.process_stack(stack_paths)
-        output_filename = f'{stack_name}.png'
-        save_image(result_custom, os.path.join(output_dir, output_filename), format='PNG')
-        print(f"Saved custom result {i}.")
-else:
-    print("No images found for multiple stacks example.")
-
+result = stacker.process_stack(["img0.jpg", "img1.jpg", "img2.jpg"], color_space="sRGB")
 ```
 
-### `FocusStacker` Options (Python API)
+### `FocusStacker` options
 
-When initializing `FocusStacker` in your Python code, you can customize its behavior:
-
-*   `focus_window_size` (int, default=7): Window size for the Laplacian Variance Map focus measure. Must be odd.
-*   `sharpen_strength` (float, default=0.0): Strength of the final Unsharp Mask filter. Set to 0.0 to disable.
-*   `num_pyramid_levels` (int, default=3): Number of levels for the Pyramid ECC alignment. `1` disables the pyramid approach.
-*   `gradient_threshold` (int, default=10): Threshold for the ECC alignment gradient mask.
-*   `blend_method` (str, default='weighted'): Blending method to use. Options: `'weighted'`, `'direct_map'`.
-
----
-
-## Contributing
-
-Contributions are very welcome! Whether you're fixing bugs, adding new features, or improving documentation, your help is appreciated.
-
-Feel free to:
-- Fork the repository
-- Create a feature branch
-- Submit pull requests
-- Open issues for bugs or feature requests
-- Suggest improvements
-
-Let's make this tool even better together!
-
----
+- `num_pyramid_levels`: 1–6
+- `gradient_threshold`: 1–100
+- `focus_window_size`: 3–21 (odd)
+- `focus_measure_method`: `"laplacian_var" | "tenengrad" | "sml"`
+- `blend_method`:
+  - `"weighted"`
+  - `"guided_weighted"`
+  - `"direct_map"`
+  - `"laplacian_pyramid"`
+  - `"luma_weighted_chroma_pick"`
+- `sharpen_strength`: 0.0–3.0
 
 ## License
 
-This project is licensed under a Non-Commercial Open Source License (NCOSL). This means:
-- ✅ Free for personal and academic use
-- ✅ Open source and can be modified
-- ✅ Must maintain the same license if distributed
-- ❌ Cannot be used for commercial purposes without permission
-- ❌ Cannot be sold or included in commercial products
-
-See the LICENSE file for full details.
-
-For commercial licensing inquiries, please open an issue or contact the project maintainer.
+Non-Commercial Open Source License (NCOSL). See `LICENSE`.

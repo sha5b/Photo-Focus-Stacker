@@ -82,10 +82,14 @@ def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
         # Calculate magnitude
         gradient_magnitude = cv2.magnitude(grad_x, grad_y)
         # Use a percentile-based threshold so the mask is robust across exposure/contrast.
-        # Fall back to the numeric threshold if percentile estimation fails.
+        # Interpret `gradient_threshold` as a mask-strength knob:
+        #   - higher => more permissive (include more pixels)
+        #   - lower => more strict (only strongest edges)
+        # Percentile is clamped to avoid pathological extremes.
         thr_val = None
         try:
-            thr_val = float(np.percentile(gradient_magnitude, 85))
+            percentile = float(np.clip(100.0 - float(gradient_threshold), 50.0, 95.0))
+            thr_val = float(np.percentile(gradient_magnitude, percentile))
         except Exception:
             thr_val = None
         if thr_val is None or not np.isfinite(thr_val) or thr_val <= 0.0:

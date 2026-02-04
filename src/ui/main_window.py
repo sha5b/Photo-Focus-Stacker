@@ -667,6 +667,7 @@ def _preset_to_settings(preset_name: str) -> Optional[StackerSettings]:
             num_pyramid_levels=1,
             gradient_threshold=10,
             focus_window_size=7,
+            focus_measure_method="laplacian_var",
             sharpen_strength=0.0,
             blend_method="direct_map",
         ).validated()
@@ -675,6 +676,7 @@ def _preset_to_settings(preset_name: str) -> Optional[StackerSettings]:
             num_pyramid_levels=3,
             gradient_threshold=10,
             focus_window_size=7,
+            focus_measure_method="laplacian_var",
             sharpen_strength=0.0,
             blend_method="weighted",
         ).validated()
@@ -683,6 +685,7 @@ def _preset_to_settings(preset_name: str) -> Optional[StackerSettings]:
             num_pyramid_levels=5,
             gradient_threshold=8,
             focus_window_size=5,
+            focus_measure_method="tenengrad",
             sharpen_strength=0.0,
             blend_method="weighted",
         ).validated()
