@@ -64,7 +64,11 @@ def _estimate_motion_ratio(img_a_u8: np.ndarray, img_b_u8: np.ndarray) -> float:
         return 0.0
 
 
-def recommend_stacker_settings(image_paths: List[str], preferred_blend_method: Optional[str] = None) -> tuple[StackerSettings, AutoTuneReport]:
+def recommend_stacker_settings(
+    image_paths: List[str],
+    preferred_blend_method: Optional[str] = None,
+    preferred_focus_measure_method: Optional[str] = None,
+) -> tuple[StackerSettings, AutoTuneReport]:
     if not image_paths:
         default = StackerSettings().validated()
         return default, AutoTuneReport(max_dim=0, megapixels=0.0, contrast_std=0.0, motion_ratio=0.0)
@@ -138,6 +142,20 @@ def recommend_stacker_settings(image_paths: List[str], preferred_blend_method: O
         else:
             blend_method = "weighted"
 
+    focus_measure_method = None
+    if isinstance(preferred_focus_measure_method, str) and preferred_focus_measure_method in (
+        "laplacian_var",
+        "tenengrad",
+        "sml",
+    ):
+        focus_measure_method = preferred_focus_measure_method
+
+    if focus_measure_method is None:
+        if contrast_std < 0.05:
+            focus_measure_method = "tenengrad"
+        else:
+            focus_measure_method = "laplacian_var"
+
     if blend_method == "direct_map":
         num_pyramid_levels = max(int(num_pyramid_levels), 3)
         focus_window_size = max(int(focus_window_size), 7)
@@ -150,6 +168,7 @@ def recommend_stacker_settings(image_paths: List[str], preferred_blend_method: O
 
     settings = StackerSettings(
         focus_window_size=focus_window_size,
+        focus_measure_method=focus_measure_method,
         sharpen_strength=0.0,
         num_pyramid_levels=num_pyramid_levels,
         gradient_threshold=gradient_threshold,

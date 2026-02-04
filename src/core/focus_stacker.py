@@ -35,6 +35,7 @@ class StackingCancelledException(Exception):
 class FocusStacker:
     def __init__(self,
                  focus_window_size=7,
+                 focus_measure_method='laplacian_var',
                  sharpen_strength=0.0,
                  num_pyramid_levels=3,
                  gradient_threshold=10,
@@ -53,7 +54,16 @@ class FocusStacker:
         """
         print("Initializing FocusStacker...")
         self.align_method_desc = f'Pyramid ECC Homography ({num_pyramid_levels} levels, Masked)'
-        self.focus_measure_method_desc = f'Laplacian Variance Map (window={focus_window_size})'
+        if focus_measure_method not in ['laplacian_var', 'tenengrad', 'sml']:
+            focus_measure_method = 'laplacian_var'
+        self.focus_measure_method = focus_measure_method
+
+        if self.focus_measure_method == 'tenengrad':
+            self.focus_measure_method_desc = f'Tenengrad Map (window={focus_window_size})'
+        elif self.focus_measure_method == 'sml':
+            self.focus_measure_method_desc = f'SML Map (window={focus_window_size})'
+        else:
+            self.focus_measure_method_desc = f'Laplacian Variance Map (window={focus_window_size})'
 
         if blend_method not in ['weighted', 'direct_map', 'laplacian_pyramid', 'guided_weighted', 'luma_weighted_chroma_pick']:
             print(f"Warning: Invalid blend_method '{blend_method}'. Defaulting to 'weighted'.")
@@ -77,11 +87,16 @@ class FocusStacker:
         self.gradient_threshold = gradient_threshold
         self._stop_requested = False
 
+        self._cache_max_items = 2
+
         utils.init_color_profiles()
         print(f"  Alignment: {self.align_method_desc}")
         print(f"  Focus Measure: {self.focus_measure_method_desc}")
         print(f"  Blending: {self.blend_method_desc}")
         print(f"  Sharpen Strength: {self.sharpen_strength:.2f}")
+
+    _intermediate_cache = {}
+    _intermediate_cache_order = []
 
     def request_stop(self):
         """Sets the flag to stop processing."""
@@ -109,19 +124,20 @@ class FocusStacker:
             window_small = int(max(3, round(self.focus_window_size * scale)))
             if window_small % 2 == 0:
                 window_small += 1
-            focus_small = focus_measure.measure_laplacian_variance_map(
-                img_gray_small,
-                window_size=window_small,
-                normalize=False,
-            ).astype(np.float32)
+            if self.focus_measure_method == 'tenengrad':
+                focus_small = focus_measure.measure_tenengrad_map(img_gray_small, window_size=window_small, normalize=False).astype(np.float32)
+            elif self.focus_measure_method == 'sml':
+                focus_small = focus_measure.measure_sml_map(img_gray_small, window_size=window_small, normalize=False).astype(np.float32)
+            else:
+                focus_small = focus_measure.measure_laplacian_variance_map(img_gray_small, window_size=window_small, normalize=False).astype(np.float32)
             focus_map = cv2.resize(focus_small, (w, h), interpolation=cv2.INTER_LINEAR)
             return focus_map.astype(np.float32)
 
-        return focus_measure.measure_laplacian_variance_map(
-            img_gray,
-            window_size=self.focus_window_size,
-            normalize=False,
-        ).astype(np.float32)
+        if self.focus_measure_method == 'tenengrad':
+            return focus_measure.measure_tenengrad_map(img_gray, window_size=self.focus_window_size, normalize=False).astype(np.float32)
+        if self.focus_measure_method == 'sml':
+            return focus_measure.measure_sml_map(img_gray, window_size=self.focus_window_size, normalize=False).astype(np.float32)
+        return focus_measure.measure_laplacian_variance_map(img_gray, window_size=self.focus_window_size, normalize=False).astype(np.float32)
 
     def process_stack(self, image_paths, color_space='sRGB'):
         """
@@ -140,46 +156,64 @@ class FocusStacker:
         base_filenames = [os.path.basename(p) for p in image_paths]
         print(f"Images: {', '.join(base_filenames[:3])}{'...' if len(base_filenames) > 3 else ''}")
 
-        # 1. Load images using utility function
-        images = []
-        for i, path in enumerate(image_paths):
+        cache_key = (
+            tuple(image_paths),
+            int(self.num_pyramid_levels),
+            int(self.gradient_threshold),
+            int(self.focus_window_size),
+            str(self.focus_measure_method),
+        )
+
+        cached = FocusStacker._intermediate_cache.get(cache_key)
+        if cached is not None:
+            aligned_images, focus_maps = cached
+            print("\nUsing cached alignment + focus maps...")
+        else:
+            images = []
+            for i, path in enumerate(image_paths):
+                self._check_stop_requested()
+                print(f"Loading image {i+1}/{len(image_paths)}: {os.path.basename(path)}")
+                try:
+                    img = utils.load_image(path)
+                    images.append(img)
+                except Exception as e:
+                    print(f"ERROR loading image {path}: {e}")
+                    raise
+
             self._check_stop_requested()
-            print(f"Loading image {i+1}/{len(image_paths)}: {os.path.basename(path)}")
+            print(f"\nAligning images using {self.align_method_desc}...")
             try:
-                img = utils.load_image(path)
-                images.append(img)
+                aligned_images = alignment.align_images(
+                    images,
+                    num_pyramid_levels=self.num_pyramid_levels,
+                    gradient_threshold=self.gradient_threshold
+                )
+                print(f"Alignment complete ({len(aligned_images)} images).")
             except Exception as e:
-                print(f"ERROR loading image {path}: {e}")
+                if not isinstance(e, StackingCancelledException):
+                    print(f"ERROR during image alignment: {e}")
                 raise
 
-        # 2. Align images using Pyramid ECC Homography with Masking
-        self._check_stop_requested()
-        print(f"\nAligning images using {self.align_method_desc}...")
-        try:
-            aligned_images = alignment.align_images(
-                images,
-                num_pyramid_levels=self.num_pyramid_levels,
-                gradient_threshold=self.gradient_threshold
-            )
-            print(f"Alignment complete ({len(aligned_images)} images).")
-        except Exception as e:
-            if not isinstance(e, StackingCancelledException):
-                print(f"ERROR during image alignment: {e}")
-            raise
+            print(f"\nCalculating focus measures using {self.focus_measure_method_desc}...")
+            focus_maps = []
+            for i, img in enumerate(aligned_images):
+                self._check_stop_requested()
+                print(f"Calculating focus for image {i+1}/{len(aligned_images)}")
+                try:
+                    focus_maps.append(self._compute_focus_map(img))
+                except Exception as e:
+                     if not isinstance(e, StackingCancelledException):
+                        print(f"ERROR calculating focus measure for image {i+1}: {e}")
+                     raise
+            print("Focus measure calculation complete.")
 
-        # 3. Calculate focus measures using Laplacian Variance Map
-        print(f"\nCalculating focus measures using {self.focus_measure_method_desc}...")
-        focus_maps = []
-        for i, img in enumerate(aligned_images):
-            self._check_stop_requested()
-            print(f"Calculating focus for image {i+1}/{len(aligned_images)}")
-            try:
-                focus_maps.append(self._compute_focus_map(img))
-            except Exception as e:
-                 if not isinstance(e, StackingCancelledException):
-                    print(f"ERROR calculating focus measure for image {i+1}: {e}")
-                 raise
-        print("Focus measure calculation complete.")
+            FocusStacker._intermediate_cache[cache_key] = (aligned_images, focus_maps)
+            if cache_key in FocusStacker._intermediate_cache_order:
+                FocusStacker._intermediate_cache_order.remove(cache_key)
+            FocusStacker._intermediate_cache_order.append(cache_key)
+            while len(FocusStacker._intermediate_cache_order) > int(self._cache_max_items):
+                oldest = FocusStacker._intermediate_cache_order.pop(0)
+                FocusStacker._intermediate_cache.pop(oldest, None)
 
         # 4. Determine sharpest indices (needed for direct map blending)
         self._check_stop_requested()

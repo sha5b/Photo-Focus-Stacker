@@ -7,11 +7,13 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, Literal
 
 BlendMethod = Literal["weighted", "direct_map", "laplacian_pyramid", "guided_weighted", "luma_weighted_chroma_pick"]
+FocusMeasureMethod = Literal["laplacian_var", "tenengrad", "sml"]
 
 
 @dataclass
 class StackerSettings:
     focus_window_size: int = 7
+    focus_measure_method: FocusMeasureMethod = "laplacian_var"
     sharpen_strength: float = 0.0
     num_pyramid_levels: int = 3
     gradient_threshold: int = 10
@@ -46,8 +48,15 @@ class StackerSettings:
 
         blend_method: BlendMethod = self.blend_method if self.blend_method in ("weighted", "direct_map", "laplacian_pyramid", "guided_weighted", "luma_weighted_chroma_pick") else "weighted"
 
+        focus_measure_method: FocusMeasureMethod = self.focus_measure_method if self.focus_measure_method in (
+            "laplacian_var",
+            "tenengrad",
+            "sml",
+        ) else "laplacian_var"
+
         return StackerSettings(
             focus_window_size=focus_window_size,
+            focus_measure_method=focus_measure_method,
             sharpen_strength=sharpen_strength,
             num_pyramid_levels=num_pyramid_levels,
             gradient_threshold=gradient_threshold,
@@ -58,6 +67,7 @@ class StackerSettings:
         validated = self.validated()
         return {
             "focus_window_size": validated.focus_window_size,
+            "focus_measure_method": validated.focus_measure_method,
             "sharpen_strength": validated.sharpen_strength,
             "num_pyramid_levels": validated.num_pyramid_levels,
             "gradient_threshold": validated.gradient_threshold,
@@ -71,6 +81,7 @@ class StackerSettings:
     def from_dict(data: Dict[str, Any]) -> "StackerSettings":
         return StackerSettings(
             focus_window_size=int(data.get("focus_window_size", 7)),
+            focus_measure_method=data.get("focus_measure_method", "laplacian_var"),
             sharpen_strength=float(data.get("sharpen_strength", 0.0)),
             num_pyramid_levels=int(data.get("num_pyramid_levels", 3)),
             gradient_threshold=int(data.get("gradient_threshold", 10)),

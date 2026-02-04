@@ -175,6 +175,14 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.focus_window_spinbox, row, 1)
         row += 1
 
+        self.focus_method_label = QLabel("Focus Measure:")
+        self.focus_method_combo = QComboBox()
+        self.focus_method_combo.addItems(["Laplacian Variance", "Tenengrad", "SML"])
+        self.focus_method_combo.currentIndexChanged.connect(self._on_stacker_changed)
+        grid.addWidget(self.focus_method_label, row, 0)
+        grid.addWidget(self.focus_method_combo, row, 1)
+        row += 1
+
         self.sharpen_label = QLabel("Sharpening Strength:")
         self.sharpen_spinbox = QDoubleSpinBox()
         self.sharpen_spinbox.setRange(0.0, 3.0)
@@ -297,6 +305,14 @@ class MainWindow(QMainWindow):
         self.regex_edit.setEnabled(is_regex)
 
     def _on_stacker_changed(self) -> None:
+        focus_method_index = int(self.focus_method_combo.currentIndex())
+        if focus_method_index == 1:
+            focus_measure_method = "tenengrad"
+        elif focus_method_index == 2:
+            focus_measure_method = "sml"
+        else:
+            focus_measure_method = "laplacian_var"
+
         blend_index = int(self.blend_combo.currentIndex())
         if blend_index == 1:
             blend_method = "direct_map"
@@ -311,6 +327,7 @@ class MainWindow(QMainWindow):
 
         current = StackerSettings(
             focus_window_size=self.focus_window_spinbox.value(),
+            focus_measure_method=focus_measure_method,
             sharpen_strength=float(self.sharpen_spinbox.value()),
             num_pyramid_levels=self.pyramid_spinbox.value(),
             gradient_threshold=self.gradient_spinbox.value(),
@@ -357,12 +374,19 @@ class MainWindow(QMainWindow):
         self.pyramid_spinbox.blockSignals(True)
         self.gradient_spinbox.blockSignals(True)
         self.focus_window_spinbox.blockSignals(True)
+        self.focus_method_combo.blockSignals(True)
         self.sharpen_spinbox.blockSignals(True)
         self.blend_combo.blockSignals(True)
 
         self.pyramid_spinbox.setValue(settings.num_pyramid_levels)
         self.gradient_spinbox.setValue(settings.gradient_threshold)
         self.focus_window_spinbox.setValue(settings.focus_window_size)
+        if getattr(settings, "focus_measure_method", "laplacian_var") == "tenengrad":
+            self.focus_method_combo.setCurrentIndex(1)
+        elif getattr(settings, "focus_measure_method", "laplacian_var") == "sml":
+            self.focus_method_combo.setCurrentIndex(2)
+        else:
+            self.focus_method_combo.setCurrentIndex(0)
         self.sharpen_spinbox.setValue(settings.sharpen_strength)
         if settings.blend_method == "direct_map":
             blend_index = 1
@@ -379,6 +403,7 @@ class MainWindow(QMainWindow):
         self.pyramid_spinbox.blockSignals(False)
         self.gradient_spinbox.blockSignals(False)
         self.focus_window_spinbox.blockSignals(False)
+        self.focus_method_combo.blockSignals(False)
         self.sharpen_spinbox.blockSignals(False)
         self.blend_combo.blockSignals(False)
 
@@ -475,7 +500,12 @@ class MainWindow(QMainWindow):
             try:
                 sample_paths = self._stack_items[0][1] if self._stack_items and self._stack_items[0][1] else self._image_paths
                 preferred_blend = self._app_settings.stacker.validated().blend_method
-                tuned_settings, _report = recommend_stacker_settings(sample_paths, preferred_blend_method=preferred_blend)
+                preferred_focus = self._app_settings.stacker.validated().focus_measure_method
+                tuned_settings, _report = recommend_stacker_settings(
+                    sample_paths,
+                    preferred_blend_method=preferred_blend,
+                    preferred_focus_measure_method=preferred_focus,
+                )
                 self._set_stacker_controls_from_settings(tuned_settings)
                 self._app_settings = AppSettings(
                     stacker=tuned_settings,

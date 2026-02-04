@@ -57,6 +57,8 @@ def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
 
     motion_type = cv2.MOTION_HOMOGRAPHY
     motion_type_str = 'HOMOGRAPHY'
+    fallback_motion_type = cv2.MOTION_AFFINE
+    fallback_motion_type_str = 'AFFINE'
 
     print(f"\nAligning images using Pyramid ECC (Motion: {motion_type_str}, Levels: {num_pyramid_levels}, Masked)...")
     reference_color = images[0]
@@ -79,13 +81,21 @@ def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
         grad_y = cv2.Sobel(ref_gray_full, cv2.CV_64F, 0, 1, ksize=3)
         # Calculate magnitude
         gradient_magnitude = cv2.magnitude(grad_x, grad_y)
-        # Threshold the magnitude to create a binary mask
-        # Pixels with gradient magnitude above the threshold are considered for ECC
-        _, mask_full = cv2.threshold(gradient_magnitude, gradient_threshold, 255, cv2.THRESH_BINARY)
+        # Use a percentile-based threshold so the mask is robust across exposure/contrast.
+        # Fall back to the numeric threshold if percentile estimation fails.
+        thr_val = None
+        try:
+            thr_val = float(np.percentile(gradient_magnitude, 85))
+        except Exception:
+            thr_val = None
+        if thr_val is None or not np.isfinite(thr_val) or thr_val <= 0.0:
+            thr_val = float(gradient_threshold)
+
+        _, mask_full = cv2.threshold(gradient_magnitude, thr_val, 255, cv2.THRESH_BINARY)
         mask_full = mask_full.astype(np.uint8) # Convert to uint8 for ECC and pyramid building
         # Optional: Dilate the mask slightly to ensure edges are included
         mask_full = cv2.dilate(mask_full, None, iterations=2)
-        print(f"  Gradient mask created with threshold {gradient_threshold}.")
+        print(f"  Gradient mask created with threshold {thr_val:.3f}.")
     except Exception as e:
         print(f"  Warning: Failed to create gradient mask: {e}. Proceeding without mask.")
         mask_full = None
@@ -142,14 +152,43 @@ def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
 
                 # Run ECC algorithm for the current level, potentially with mask
                 try:
-                    # Pass mask_level to inputMask parameter
-                    (cc, warp_matrix_level) = cv2.findTransformECC(ref_level, img_level, warp_matrix, motion_type, criteria, inputMask=mask_level, gaussFiltSize=5)
+                    (cc, warp_matrix_level) = cv2.findTransformECC(
+                        ref_level,
+                        img_level,
+                        warp_matrix,
+                        motion_type,
+                        criteria,
+                        inputMask=mask_level,
+                        gaussFiltSize=5,
+                    )
                     warp_matrix = warp_matrix_level
                     print(f"    ECC finished for level {level}. Correlation: {cc:.4f}")
                 except cv2.error as ecc_error:
-                     print(f"    Warning: findTransformECC failed for image {i+1} at level {level}: {ecc_error}. Using original image.")
-                     warp_matrix = None # Signal failure
-                     break # Stop processing levels for this image
+                    # Try a less flexible model when homography fails.
+                    print(
+                        f"    Warning: findTransformECC ({motion_type_str}) failed for image {i+1} at level {level}: {ecc_error}. "
+                        f"Trying {fallback_motion_type_str}..."
+                    )
+                    try:
+                        warp_affine = warp_matrix[:2, :] if warp_matrix is not None else np.eye(2, 3, dtype=np.float32)
+                        (cc, warp_affine_level) = cv2.findTransformECC(
+                            ref_level,
+                            img_level,
+                            warp_affine,
+                            fallback_motion_type,
+                            criteria,
+                            inputMask=mask_level,
+                            gaussFiltSize=5,
+                        )
+                        warp_matrix = np.vstack([warp_affine_level, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
+                        print(f"    ECC finished for level {level} with {fallback_motion_type_str}. Correlation: {cc:.4f}")
+                    except cv2.error as ecc_error_2:
+                        print(
+                            f"    Warning: findTransformECC ({fallback_motion_type_str}) also failed for image {i+1} at level {level}: {ecc_error_2}. "
+                            "Using original image."
+                        )
+                        warp_matrix = None
+                        break
 
             if warp_matrix is None: # Check if ECC failed at any level
                 aligned_color.append(img_color)

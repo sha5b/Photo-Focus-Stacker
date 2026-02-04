@@ -54,3 +54,64 @@ def measure_laplacian_variance_map(img_gray, window_size=7, normalize=True): # D
 
     print("Laplacian variance map calculation complete.")
     return focus_map.astype(np.float32)
+
+
+def measure_tenengrad_map(img_gray, window_size=7, normalize=True):
+    print(f"Calculating Tenengrad focus map (window={window_size})...")
+    if img_gray.dtype != np.uint8:
+        img_gray_uint8 = (img_gray * 255).astype(np.uint8)
+    else:
+        img_gray_uint8 = img_gray
+
+    window_size = window_size if window_size % 2 != 0 else window_size + 1
+
+    gx = cv2.Sobel(img_gray_uint8, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(img_gray_uint8, cv2.CV_32F, 0, 1, ksize=3)
+    grad_energy = cv2.multiply(gx, gx) + cv2.multiply(gy, gy)
+
+    focus_map = cv2.boxFilter(grad_energy, -1, (window_size, window_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+    focus_map = np.maximum(focus_map, 0.0)
+
+    if not normalize:
+        print("Tenengrad focus map calculation complete.")
+        return focus_map.astype(np.float32)
+
+    min_val, max_val, _, _ = cv2.minMaxLoc(focus_map)
+    if max_val > min_val:
+        focus_map = (focus_map - min_val) / (max_val - min_val)
+    else:
+        focus_map = np.zeros_like(focus_map)
+
+    print("Tenengrad focus map calculation complete.")
+    return focus_map.astype(np.float32)
+
+
+def measure_sml_map(img_gray, window_size=7, normalize=True):
+    print(f"Calculating SML focus map (window={window_size})...")
+    if img_gray.dtype != np.uint8:
+        img_gray_uint8 = (img_gray * 255).astype(np.uint8)
+    else:
+        img_gray_uint8 = img_gray
+
+    window_size = window_size if window_size % 2 != 0 else window_size + 1
+
+    kernel = np.array([[0, 0, 0], [1, -2, 1], [0, 0, 0]], dtype=np.float32)
+    lap_x = cv2.filter2D(img_gray_uint8.astype(np.float32), ddepth=cv2.CV_32F, kernel=kernel, borderType=cv2.BORDER_REFLECT)
+    lap_y = cv2.filter2D(img_gray_uint8.astype(np.float32), ddepth=cv2.CV_32F, kernel=kernel.T, borderType=cv2.BORDER_REFLECT)
+    sml = np.abs(lap_x) + np.abs(lap_y)
+
+    focus_map = cv2.boxFilter(sml, -1, (window_size, window_size), normalize=True, borderType=cv2.BORDER_REFLECT)
+    focus_map = np.maximum(focus_map, 0.0)
+
+    if not normalize:
+        print("SML focus map calculation complete.")
+        return focus_map.astype(np.float32)
+
+    min_val, max_val, _, _ = cv2.minMaxLoc(focus_map)
+    if max_val > min_val:
+        focus_map = (focus_map - min_val) / (max_val - min_val)
+    else:
+        focus_map = np.zeros_like(focus_map)
+
+    print("SML focus map calculation complete.")
+    return focus_map.astype(np.float32)

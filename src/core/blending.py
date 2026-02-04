@@ -90,6 +90,16 @@ def _compute_weight_maps(aligned_images, focus_maps):
     return weight_maps, valid_images
 
 
+def _normalize_weights_softmax(weights_stack: np.ndarray, beta: float = 6.0, epsilon: float = 1e-10) -> np.ndarray:
+    w = np.nan_to_num(weights_stack.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    w = np.maximum(w, 0.0)
+    x = w * float(beta)
+    x = x - np.max(x, axis=0, keepdims=True)
+    exp_x = np.exp(np.clip(x, -50.0, 50.0))
+    sum_exp = np.sum(exp_x, axis=0, keepdims=True)
+    return exp_x / (sum_exp + float(epsilon))
+
+
 def _edge_aware_smooth_weight_map(guide_gray: np.ndarray, weight_map_2d: np.ndarray, radius: int, eps: float) -> np.ndarray:
     guide = np.nan_to_num(guide_gray.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     src = np.nan_to_num(weight_map_2d.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
@@ -123,48 +133,19 @@ def blend_guided_weighted(aligned_images, focus_maps):
     eps = 1e-3
 
     weights_stack = np.stack(weight_maps, axis=0).astype(np.float32)[..., 0]
-    weights_stack = np.maximum(weights_stack, 0.0) + epsilon
-    gamma = 3.0
-    weights_stack = np.power(weights_stack, gamma)
-    weights_sum = np.sum(weights_stack, axis=0)
-    weights_norm = weights_stack / (weights_sum + epsilon)
+    weights_norm = _normalize_weights_softmax(weights_stack, beta=6.0, epsilon=epsilon)
 
-    ref_gray = cv2.cvtColor((valid_images[0] * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-    if hasattr(cv2, "ximgproc") and hasattr(cv2.ximgproc, "guidedFilter"):
-        print("  Refining weights (edge-aware)...")
-        radius = int(max(4, min(12, round(min(h, w) / 300.0))))
-        eps = 1e-3
-        refined = []
-        for k in range(weights_norm.shape[0]):
-            refined_k = cv2.ximgproc.guidedFilter(
-                guide=ref_gray,
-                src=weights_norm[k, ..., 0].astype(np.float32),
-                radius=radius,
-                eps=float(eps),
-            )
-            refined.append(np.maximum(refined_k, 0.0))
-        refined_stack = np.stack(refined, axis=0).astype(np.float32)
-        refined_sum = np.sum(refined_stack, axis=0)
-        weights_norm = (refined_stack / (refined_sum + epsilon))[..., np.newaxis]
-    else:
-        refined = []
-        for k in range(weights_norm.shape[0]):
-            refined.append(cv2.GaussianBlur(weights_norm[k, ..., 0].astype(np.float32), (0, 0), sigmaX=1.0, sigmaY=1.0, borderType=cv2.BORDER_REFLECT))
-        refined_stack = np.stack(refined, axis=0).astype(np.float32)
-        refined_sum = np.sum(refined_stack, axis=0)
-        weights_norm = (refined_stack / (refined_sum + epsilon))[..., np.newaxis]
-
-    guided_list = []
+    refined = []
     for k in range(weights_norm.shape[0]):
-        guided = _edge_aware_smooth_weight_map(ref_gray, weights_norm[k], radius=radius, eps=eps)
-        guided_list.append(np.maximum(guided, 0.0))
+        refined_k = _edge_aware_smooth_weight_map(ref_gray, weights_norm[k], radius=radius, eps=eps)
+        refined.append(np.maximum(refined_k, 0.0))
 
-    guided_stack = np.stack(guided_list, axis=0).astype(np.float32)
-    guided_sum = np.sum(guided_stack, axis=0)
-    guided_norm = guided_stack / (guided_sum + epsilon)
+    refined_stack = np.stack(refined, axis=0).astype(np.float32)
+    refined_sum = np.sum(refined_stack, axis=0)
+    refined_norm = refined_stack / (refined_sum + epsilon)
 
     image_stack = np.stack(valid_images, axis=0).astype(np.float32)
-    result = np.sum(image_stack * guided_norm[..., np.newaxis], axis=0)
+    result = np.sum(image_stack * refined_norm[..., np.newaxis], axis=0)
     result = np.clip(result.astype(np.float32), 0.0, 1.0)
     print("Guided weighted blending complete.")
     return result
@@ -187,12 +168,8 @@ def blend_luma_weighted_chroma_pick(aligned_images, focus_maps):
         raise ValueError("No valid weight maps were produced for blending.")
 
     epsilon = 1e-10
-    weights_stack = np.stack(weight_maps, axis=0).astype(np.float32)
-    weights_stack = np.maximum(weights_stack, 0.0) + epsilon
-    gamma = 3.0
-    weights_stack = np.power(weights_stack, gamma)
-    weights_sum = np.sum(weights_stack, axis=0)
-    weights_norm = weights_stack / (weights_sum + epsilon)
+    weights_stack = np.stack(weight_maps, axis=0).astype(np.float32)[..., 0]
+    weights_norm = _normalize_weights_softmax(weights_stack, beta=6.0, epsilon=epsilon)[..., np.newaxis]
 
     print("  Converting images to YCrCb...")
     y_list = []
@@ -298,10 +275,7 @@ def blend_laplacian_pyramid(aligned_images, focus_maps, num_levels: int = 3):
     for level in range(actual_levels):
         weights_level = [wg[level][..., np.newaxis] if wg[level].ndim == 2 else wg[level] for wg in weight_gaussians]
         weights_stack = np.stack(weights_level, axis=0)
-        weights_stack = np.maximum(weights_stack, 0.0) + epsilon
-        weights_stack = np.power(weights_stack, gamma)
-        weights_sum = np.sum(weights_stack, axis=0)
-        weights_norm = weights_stack / (weights_sum + epsilon)
+        weights_norm = _normalize_weights_softmax(weights_stack, beta=6.0, epsilon=epsilon)
 
         fused_level = np.zeros_like(image_laplacians[0][level], dtype=np.float32)
         for img_idx in range(len(image_laplacians)):
@@ -375,13 +349,7 @@ def blend_weighted(aligned_images, focus_maps):
         raise ValueError("No valid weight maps were produced for blending.")
 
     weights_stack = np.stack(weight_maps, axis=0).astype(np.float32)
-    weights_stack = np.maximum(weights_stack, 0.0) + epsilon
-
-    gamma = 3.0
-    weights_stack = np.power(weights_stack, gamma)
-
-    weights_sum = np.sum(weights_stack, axis=0)
-    normalized_weights = weights_stack / (weights_sum + epsilon)
+    normalized_weights = _normalize_weights_softmax(weights_stack, beta=6.0, epsilon=epsilon)
 
     image_stack = np.stack(valid_images, axis=0).astype(np.float32)
     result = np.sum(image_stack * normalized_weights, axis=0)
