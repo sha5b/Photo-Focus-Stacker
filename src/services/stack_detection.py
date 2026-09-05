@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
-from typing import Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Sequence
+from typing import List, Tuple
 
 try:
     import natsort
@@ -50,11 +50,11 @@ def detect_stacks(
 
     # auto
     auto = _split_by_regex(normalized_paths, _LEGACY_PATTERN)
-    if _looks_reasonable(auto):
+    if _has_named_match(auto) and _looks_reasonable(auto):
         return auto
 
     common = _split_by_common_suffix(normalized_paths)
-    if _looks_reasonable(common):
+    if _has_named_match(common) and _looks_reasonable(common):
         return common
 
     return [("stack", _natural_sort(normalized_paths))]
@@ -67,6 +67,10 @@ def _looks_reasonable(stacks: List[StackItem]) -> bool:
     if len(stacks) > 1:
         return True
     return len(stacks[0][1]) >= 2
+
+
+def _has_named_match(stacks: List[StackItem]) -> bool:
+    return any(name not in ("default_stack", "stack", "") for name, _ in stacks)
 
 
 def _split_fixed_size(image_paths: Sequence[str], fixed_stack_size: int) -> List[StackItem]:

@@ -14,6 +14,8 @@ from src.core.focus_stacker import FocusStacker, StackingCancelledException
 class FocusStackingWorker(QThread):
     finished = pyqtSignal(object)
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
+    progress = pyqtSignal(int)
 
     def __init__(self, stacker_settings: StackerSettings, image_paths: List[str], color_space: str):
         super().__init__()
@@ -26,12 +28,15 @@ class FocusStackingWorker(QThread):
 
     def run(self) -> None:
         try:
-            self._stacker = FocusStacker(**self._stacker_settings.to_focus_stacker_kwargs())
+            self._stacker = FocusStacker(
+                **self._stacker_settings.to_focus_stacker_kwargs(),
+                progress_callback=self.progress.emit,
+            )
             result = self._stacker.process_stack(self._image_paths, self._color_space)
             if not self._stopped:
                 self.finished.emit(result)
         except StackingCancelledException:
-            pass
+            self.cancelled.emit()
         except Exception as e:
             if not self._stopped:
                 self.error.emit(str(e))
@@ -40,3 +45,7 @@ class FocusStackingWorker(QThread):
         self._stopped = True
         if self._stacker is not None:
             self._stacker.request_stop()
+
+    @property
+    def stacker(self) -> Optional[FocusStacker]:
+        return self._stacker

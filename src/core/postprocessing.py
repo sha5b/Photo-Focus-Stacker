@@ -7,6 +7,7 @@
 import cv2
 import numpy as np
 
+
 def apply_unsharp_mask(image, strength=0.5, kernel_size=(5, 5), sigma=1.0):
     """
     Applies Unsharp Masking to enhance image sharpness.

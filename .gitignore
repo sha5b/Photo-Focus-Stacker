@@ -161,3 +161,6 @@ cython_debug/
 
 # Focus stacking output
 output/
+
+# Locally downloaded, potentially large test datasets
+test_data/

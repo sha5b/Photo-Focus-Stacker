@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from .output_settings import OutputSettings
 from .stack_detection_settings import StackDetectionSettings
 from .stacking_settings import StackerSettings
-
 
 _DEFAULT_SETTINGS_FILENAME = "photo_focus_stacker_settings.json"
 
@@ -34,7 +34,7 @@ class AppSettings:
         }
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "AppSettings":
+    def from_dict(data: Dict[str, Any]) -> AppSettings:
         stacker_data = data.get("stacker", {}) if isinstance(data, dict) else {}
         detection_data = data.get("stack_detection", {}) if isinstance(data, dict) else {}
         output_data = data.get("output", {}) if isinstance(data, dict) else {}
@@ -51,9 +51,11 @@ class AppSettings:
 
 
 def get_default_settings_path() -> str:
-    # Use %APPDATA% on Windows when available, otherwise fall back to user home.
-    base_dir = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return os.path.join(base_dir, _DEFAULT_SETTINGS_FILENAME)
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return os.path.join(appdata, _DEFAULT_SETTINGS_FILENAME)
+    config_home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(config_home, "photo-focus-stacker", "settings.json")
 
 
 def load_settings(path: Optional[str] = None) -> AppSettings:
@@ -92,5 +94,17 @@ def save_settings(settings: AppSettings, path: Optional[str] = None) -> None:
     if settings_dir:
         os.makedirs(settings_dir, exist_ok=True)
 
-    with open(settings_path, "w", encoding="utf-8") as f:
-        json.dump(settings.to_dict(), f, indent=2, sort_keys=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=settings_dir or ".",
+            prefix=".settings-", suffix=".tmp", delete=False,
+        ) as handle:
+            temporary_path = handle.name
+            json.dump(settings.to_dict(), handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, settings_path)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.unlink(temporary_path)

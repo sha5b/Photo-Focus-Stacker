@@ -1,217 +1,253 @@
 #!/usr/bin/env python3
+"""Robust, diagnostics-producing registration for focus stacks."""
 
-# Context: Image alignment routines for Photo Focus Stacker
-# Purpose: Align all images in a stack to the first image using Pyramid ECC (homography) with an edge-based mask.
-# Notes: Called by `src.core.focus_stacker.FocusStacker` before focus measurement and blending.
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
-import os
 
-def _build_gaussian_pyramid(img, levels):
-    """Builds a Gaussian pyramid."""
+
+@dataclass(frozen=True)
+class AlignmentDiagnostic:
+    source_index: int
+    accepted: bool
+    model: str
+    correlation: float
+    overlap_ratio: float
+    message: str = ""
+    transform: tuple[tuple[float, ...], ...] = ()
+
+
+@dataclass
+class AlignmentResult:
+    images: list[np.ndarray]
+    valid_masks: list[np.ndarray]
+    source_indices: list[int]
+    transforms: list[np.ndarray]
+    diagnostics: list[AlignmentDiagnostic]
+    reference_index: int
+
+
+_MOTION_TYPES = {
+    "translation": cv2.MOTION_TRANSLATION,
+    "euclidean": cv2.MOTION_EUCLIDEAN,
+    "affine": cv2.MOTION_AFFINE,
+    "homography": cv2.MOTION_HOMOGRAPHY,
+}
+
+
+def _build_gaussian_pyramid(img: np.ndarray, levels: int) -> list[np.ndarray]:
     pyramid = [img]
-    for _ in range(levels - 1):
-        img = cv2.pyrDown(img, borderType=cv2.BORDER_REFLECT)
-        if img is None or img.shape[0] < 2 or img.shape[1] < 2:
-            print(f"      Warning: Pyramid level generation stopped early due to small image size.")
+    for _ in range(max(1, int(levels)) - 1):
+        # ECC becomes unstable when the coarsest level contains too few features.
+        if img.shape[0] < 64 or img.shape[1] < 64:
             break
+        img = cv2.pyrDown(img, borderType=cv2.BORDER_REFLECT)
         pyramid.append(img)
     return pyramid
 
 
-def _scale_homography_for_finer_level(warp_matrix, scale_factor=2.0):
-    """Scales a homography warp matrix when moving from coarser to finer pyramid levels."""
-    s = float(scale_factor)
-    s_inv = 1.0 / s
+def _scale_warp_for_finer_level(warp: np.ndarray) -> np.ndarray:
+    result = warp.copy()
+    if result.shape == (3, 3):
+        scale_up = np.diag([2.0, 2.0, 1.0]).astype(np.float32)
+        scale_down = np.diag([0.5, 0.5, 1.0]).astype(np.float32)
+        return scale_up @ result @ scale_down
+    result[0, 2] *= 2.0
+    result[1, 2] *= 2.0
+    return result
 
-    scale_up = np.array(
-        [[s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, 1.0]],
-        dtype=np.float32,
-    )
-    scale_down = np.array(
-        [[s_inv, 0.0, 0.0], [0.0, s_inv, 0.0], [0.0, 0.0, 1.0]],
-        dtype=np.float32,
-    )
 
-    return scale_up @ warp_matrix @ scale_down
+def _as_homography(warp: np.ndarray) -> np.ndarray:
+    if warp.shape == (3, 3):
+        return warp.astype(np.float32)
+    return np.vstack([warp, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
 
-# Only alignment method: Pyramid ECC Homography with Masking
-def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5, gradient_threshold=10):
-    """
-    Align images using pyramid-based ECC (Enhanced Correlation Coefficient)
-    with HOMOGRAPHY motion model and an input mask derived from reference image gradients.
-    Aligns all images to the first image in the list.
 
-    @param images: List of images (as float32 NumPy arrays [0, 1]) to align.
-    @param num_pyramid_levels: Number of pyramid levels to use (e.g., 3 or 4).
-    @param max_iterations: Maximum number of iterations for ECC algorithm per level.
-    @param epsilon: Termination threshold for ECC algorithm per level.
-    @param gradient_threshold: Threshold for creating the gradient mask. Lower values include more pixels.
-    @return: List of aligned images (float32 NumPy arrays [0, 1]).
-    """
+def _gray_for_registration(image: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(np.clip(image, 0.0, 1.0).astype(np.float32), cv2.COLOR_RGB2GRAY)
+    lo, hi = np.percentile(gray, (0.5, 99.5))
+    if hi > lo:
+        gray = np.clip((gray - lo) / (hi - lo), 0.0, 1.0)
+    return gray.astype(np.float32)
+
+
+def _gradient_mask(gray: np.ndarray, strength: int) -> np.ndarray:
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    magnitude = cv2.magnitude(gx, gy)
+    percentile = float(np.clip(100.0 - float(strength), 50.0, 95.0))
+    threshold = float(np.percentile(magnitude, percentile))
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        return np.full(gray.shape, 255, dtype=np.uint8)
+    mask = (magnitude >= threshold).astype(np.uint8) * 255
+    return cv2.dilate(mask, None, iterations=2)
+
+
+def _fallback_models(model: str) -> list[str]:
+    order = ["homography", "affine", "euclidean", "translation"]
+    return order[order.index(model):]
+
+
+def _validate_images(images: list[np.ndarray]) -> tuple[int, int]:
     if not images:
-        return []
-    if len(images) == 1:
-        return images # No alignment needed
+        raise ValueError("No images were supplied for alignment.")
+    h, w = images[0].shape[:2]
+    for index, image in enumerate(images):
+        if image is None or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(f"Image {index} is not an HxWx3 RGB image.")
+        if image.shape[:2] != (h, w):
+            raise ValueError(
+                f"All stack images must have the same dimensions; image {index} is "
+                f"{image.shape[:2]}, expected {(h, w)}."
+            )
+    return h, w
 
-    motion_type = cv2.MOTION_HOMOGRAPHY
-    motion_type_str = 'HOMOGRAPHY'
-    fallback_motion_type = cv2.MOTION_AFFINE
-    fallback_motion_type_str = 'AFFINE'
 
-    print(f"\nAligning images using Pyramid ECC (Motion: {motion_type_str}, Levels: {num_pyramid_levels}, Masked)...")
-    reference_color = images[0]
-    aligned_color = [reference_color] # Start with the reference image (color)
-    h_full, w_full = reference_color.shape[:2]
+def align_images_detailed(
+    images: list[np.ndarray], num_pyramid_levels: int = 3,
+    max_iterations: int = 100, epsilon: float = 1e-5,
+    gradient_threshold: int = 10, motion_model: str = "affine",
+    reference_index: Optional[int] = None, min_correlation: float = 0.35,
+    min_overlap: float = 0.70, failure_policy: str = "exclude",
+    cancel_check: Optional[Callable[[], None]] = None, release_sources: bool = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+) -> AlignmentResult:
+    """Align a stack and return transforms, validity masks, and quality diagnostics."""
+    h, w = _validate_images(images)
+    if motion_model not in _MOTION_TYPES:
+        raise ValueError(f"Unsupported alignment model: {motion_model}")
+    if failure_policy not in ("exclude", "error", "keep"):
+        raise ValueError("failure_policy must be 'exclude', 'error', or 'keep'.")
 
-    # Convert reference image to grayscale uint8
-    try:
-        ref_gray_full = cv2.cvtColor((reference_color * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-    except cv2.error as e:
-        print(f"Error converting reference image to grayscale: {e}")
-        print("Cannot proceed with ECC alignment.")
-        return images # Return original images
+    ref_index = len(images) // 2 if reference_index is None else int(reference_index)
+    if not 0 <= ref_index < len(images):
+        raise ValueError("reference_index is outside the stack.")
 
-    # --- Create Gradient Mask from Reference Image ---
-    print("  Creating gradient mask from reference image...")
-    try:
-        # Calculate Sobel gradients
-        grad_x = cv2.Sobel(ref_gray_full, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(ref_gray_full, cv2.CV_64F, 0, 1, ksize=3)
-        # Calculate magnitude
-        gradient_magnitude = cv2.magnitude(grad_x, grad_y)
-        # Use a percentile-based threshold so the mask is robust across exposure/contrast.
-        # Interpret `gradient_threshold` as a mask-strength knob:
-        #   - higher => more permissive (include more pixels)
-        #   - lower => more strict (only strongest edges)
-        # Percentile is clamped to avoid pathological extremes.
-        thr_val = None
-        try:
-            percentile = float(np.clip(100.0 - float(gradient_threshold), 50.0, 95.0))
-            thr_val = float(np.percentile(gradient_magnitude, percentile))
-        except Exception:
-            thr_val = None
-        if thr_val is None or not np.isfinite(thr_val) or thr_val <= 0.0:
-            thr_val = float(gradient_threshold)
+    reference = images[ref_index].astype(np.float32, copy=False)
+    ref_gray = _gray_for_registration(reference)
+    ref_pyramid = _build_gaussian_pyramid(ref_gray, num_pyramid_levels)
+    mask_pyramid = _build_gaussian_pyramid(_gradient_mask(ref_gray, gradient_threshold), len(ref_pyramid))
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, int(max_iterations), float(epsilon))
 
-        _, mask_full = cv2.threshold(gradient_magnitude, thr_val, 255, cv2.THRESH_BINARY)
-        mask_full = mask_full.astype(np.uint8) # Convert to uint8 for ECC and pyramid building
-        # Optional: Dilate the mask slightly to ensure edges are included
-        mask_full = cv2.dilate(mask_full, None, iterations=2)
-        print(f"  Gradient mask created with threshold {thr_val:.3f}.")
-    except Exception as e:
-        print(f"  Warning: Failed to create gradient mask: {e}. Proceeding without mask.")
-        mask_full = None
-    # -----------------------------------------------
+    aligned: list[np.ndarray] = []
+    valid_masks: list[np.ndarray] = []
+    source_indices: list[int] = []
+    transforms: list[np.ndarray] = []
+    diagnostics: list[AlignmentDiagnostic] = []
 
-    # Build reference pyramid (grayscale)
-    ref_pyramid = _build_gaussian_pyramid(ref_gray_full, num_pyramid_levels)
-    actual_levels = len(ref_pyramid)
-    print(f"  Reference pyramid built with {actual_levels} levels.")
+    for source_index, image in enumerate(images):
+        if cancel_check:
+            cancel_check()
+        if source_index == ref_index:
+            transform = np.eye(3, dtype=np.float32)
+            aligned.append(reference)
+            valid_masks.append(np.ones((h, w), dtype=np.float32))
+            source_indices.append(source_index)
+            transforms.append(transform)
+            diagnostics.append(AlignmentDiagnostic(
+                source_index, True, "identity", 1.0, 1.0, "",
+                tuple(tuple(float(value) for value in row) for row in transform),
+            ))
+            if release_sources:
+                images[source_index] = None
+            if progress_callback:
+                progress_callback(source_index + 1, len(images))
+            continue
 
-    # Build mask pyramid if mask was created successfully
-    mask_pyramid = None
-    if mask_full is not None:
-        mask_pyramid = _build_gaussian_pyramid(mask_full, actual_levels)
-        # Ensure mask pyramid has same number of levels (important if pyramid stopped early)
-        if len(mask_pyramid) != actual_levels:
-            print("  Warning: Mask pyramid level count mismatch. Disabling mask.")
-            mask_pyramid = None
+        image_pyramid = _build_gaussian_pyramid(_gray_for_registration(image), len(ref_pyramid))
+        last_error = "ECC did not converge"
+        accepted = False
+        final_model = motion_model
+        final_cc = float("nan")
+        final_transform = np.eye(3, dtype=np.float32)
+
+        for candidate_model in _fallback_models(motion_model):
+            warp = np.eye(3, dtype=np.float32) if candidate_model == "homography" else np.eye(2, 3, dtype=np.float32)
+            try:
+                coarse_ref = ref_pyramid[-1]
+                coarse_image = image_pyramid[-1]
+                shift, phase_response = cv2.phaseCorrelate(coarse_ref, coarse_image)
+                if np.isfinite(phase_response) and phase_response >= 0.05:
+                    warp[0, 2] = float(shift[0])
+                    warp[1, 2] = float(shift[1])
+                for level in range(len(ref_pyramid) - 1, -1, -1):
+                    if cancel_check:
+                        cancel_check()
+                    if level < len(ref_pyramid) - 1:
+                        warp = _scale_warp_for_finer_level(warp)
+                    final_cc, warp = cv2.findTransformECC(
+                        ref_pyramid[level], image_pyramid[level], warp,
+                        _MOTION_TYPES[candidate_model], criteria,
+                        inputMask=mask_pyramid[level], gaussFiltSize=5,
+                    )
+                final_transform = _as_homography(warp)
+                final_model = candidate_model
+                accepted = np.isfinite(final_cc) and final_cc >= float(min_correlation)
+                if accepted:
+                    break
+                last_error = f"correlation {final_cc:.3f} is below {min_correlation:.3f}"
+            except cv2.error as exc:
+                last_error = str(exc).splitlines()[0]
+
+        if accepted:
+            warped_mask = cv2.warpPerspective(
+                np.ones((h, w), dtype=np.uint8), final_transform, (w, h),
+                flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            ).astype(np.float32)
+            overlap = float(np.mean(warped_mask > 0.5))
+            accepted = overlap >= float(min_overlap)
+            if not accepted:
+                last_error = f"overlap {overlap:.3f} is below {min_overlap:.3f}"
         else:
-             print(f"  Mask pyramid built with {actual_levels} levels.")
+            overlap = 0.0
 
+        diagnostics.append(AlignmentDiagnostic(
+            source_index, accepted, final_model,
+            float(final_cc) if np.isfinite(final_cc) else 0.0, overlap,
+            "" if accepted else last_error,
+            tuple(tuple(float(value) for value in row) for row in final_transform),
+        ))
 
-    # Define termination criteria for ECC
-    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, max_iterations, epsilon)
-
-    # Align subsequent images to the reference
-    for i, img_color in enumerate(images[1:], 1):
-        print(f"\nAligning image {i+1}/{len(images)} using Pyramid ECC...")
-
-        try:
-            # Convert current image to grayscale uint8
-            img_gray_full = cv2.cvtColor((img_color * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY)
-
-            # Build image pyramid
-            img_pyramid = _build_gaussian_pyramid(img_gray_full, actual_levels)
-            if len(img_pyramid) != actual_levels:
-                 print(f"  Warning: Image {i+1} pyramid has different levels ({len(img_pyramid)}) than reference ({actual_levels}). Using original image.")
-                 aligned_color.append(img_color)
-                 continue
-
-            # Initialize warp matrix (Homography is 3x3)
-            warp_matrix = np.eye(3, 3, dtype=np.float32)
-
-            # Iterate down the pyramid (from smallest level to largest)
-            for level in range(actual_levels - 1, -1, -1):
-                print(f"  Processing pyramid level {level} (shape: {ref_pyramid[level].shape})...")
-                ref_level = ref_pyramid[level]
-                img_level = img_pyramid[level]
-                mask_level = mask_pyramid[level] if mask_pyramid else None # Get mask for this level
-
-                # Scale warp matrix from previous level if not the smallest level
-                if level < actual_levels - 1:
-                    warp_matrix = _scale_homography_for_finer_level(warp_matrix, scale_factor=2.0)
-
-                # Run ECC algorithm for the current level, potentially with mask
-                try:
-                    (cc, warp_matrix_level) = cv2.findTransformECC(
-                        ref_level,
-                        img_level,
-                        warp_matrix,
-                        motion_type,
-                        criteria,
-                        inputMask=mask_level,
-                        gaussFiltSize=5,
-                    )
-                    warp_matrix = warp_matrix_level
-                    print(f"    ECC finished for level {level}. Correlation: {cc:.4f}")
-                except cv2.error as ecc_error:
-                    # Try a less flexible model when homography fails.
-                    print(
-                        f"    Warning: findTransformECC ({motion_type_str}) failed for image {i+1} at level {level}: {ecc_error}. "
-                        f"Trying {fallback_motion_type_str}..."
-                    )
-                    try:
-                        warp_affine = warp_matrix[:2, :] if warp_matrix is not None else np.eye(2, 3, dtype=np.float32)
-                        (cc, warp_affine_level) = cv2.findTransformECC(
-                            ref_level,
-                            img_level,
-                            warp_affine,
-                            fallback_motion_type,
-                            criteria,
-                            inputMask=mask_level,
-                            gaussFiltSize=5,
-                        )
-                        warp_matrix = np.vstack([warp_affine_level, np.array([0.0, 0.0, 1.0], dtype=np.float32)])
-                        print(f"    ECC finished for level {level} with {fallback_motion_type_str}. Correlation: {cc:.4f}")
-                    except cv2.error as ecc_error_2:
-                        print(
-                            f"    Warning: findTransformECC ({fallback_motion_type_str}) also failed for image {i+1} at level {level}: {ecc_error_2}. "
-                            "Using original image."
-                        )
-                        warp_matrix = None
-                        break
-
-            if warp_matrix is None: # Check if ECC failed at any level
-                aligned_color.append(img_color)
+        if not accepted:
+            if failure_policy == "error":
+                raise ValueError(f"Alignment rejected image {source_index}: {last_error}")
+            if failure_policy == "exclude":
+                if release_sources:
+                    images[source_index] = None
+                if progress_callback:
+                    progress_callback(source_index + 1, len(images))
                 continue
+            final_transform = np.eye(3, dtype=np.float32)
+            warped_mask = np.ones((h, w), dtype=np.float32)
 
-            # Warp the original COLOR image using the final transformation matrix
-            aligned_img = cv2.warpPerspective(img_color, warp_matrix, (w_full, h_full), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP, borderMode=cv2.BORDER_REFLECT)
+        warped = cv2.warpPerspective(
+            image.astype(np.float32), final_transform, (w, h),
+            flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        aligned.append(warped.astype(np.float32))
+        valid_masks.append(warped_mask)
+        source_indices.append(source_index)
+        transforms.append(final_transform)
+        if release_sources:
+            images[source_index] = None
+        if progress_callback:
+            progress_callback(source_index + 1, len(images))
 
-            aligned_color.append(aligned_img.astype(np.float32)) # Ensure output is float32
-            print(f"  Aligned image {i+1} using Pyramid ECC.")
+    if len(aligned) < 2:
+        raise ValueError("Fewer than two images passed alignment quality checks.")
+    return AlignmentResult(aligned, valid_masks, source_indices, transforms, diagnostics, ref_index)
 
-        except cv2.error as e:
-            print(f"OpenCV Error aligning image {i+1} with Pyramid ECC: {str(e)}")
-            print("  Using original image as fallback.")
-            aligned_color.append(img_color)
-        except Exception as e:
-            print(f"Unexpected Error aligning image {i+1} with Pyramid ECC: {str(e)}")
-            print("  Using original image as fallback.")
-            aligned_color.append(img_color)
 
-    print(f"\nPyramid ECC Alignment complete. Returning {len(aligned_color)} images.")
-    return aligned_color
+def align_images(images, num_pyramid_levels=3, max_iterations=100, epsilon=1e-5,
+                 gradient_threshold=10, **kwargs):
+    """Backward-compatible API returning only registered images."""
+    return align_images_detailed(
+        images, num_pyramid_levels=num_pyramid_levels, max_iterations=max_iterations,
+        epsilon=epsilon, gradient_threshold=gradient_threshold, **kwargs,
+    ).images

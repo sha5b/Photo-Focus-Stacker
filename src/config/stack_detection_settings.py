@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal
 
 StackDetectionMode = Literal["auto", "legacy", "common_suffix", "fixed_size", "regex"]
 
@@ -17,7 +17,7 @@ class StackDetectionSettings:
 
     regex_pattern: str = ""
 
-    def validated(self) -> "StackDetectionSettings":
+    def validated(self) -> StackDetectionSettings:
         mode: StackDetectionMode = self.mode if self.mode in (
             "auto",
             "legacy",
@@ -27,8 +27,7 @@ class StackDetectionSettings:
         ) else "auto"
 
         fixed_stack_size = int(self.fixed_stack_size)
-        if fixed_stack_size < 0:
-            fixed_stack_size = 0
+        fixed_stack_size = max(fixed_stack_size, 0)
 
         regex_pattern = str(self.regex_pattern or "")
 
@@ -42,7 +41,7 @@ class StackDetectionSettings:
         return asdict(self.validated())
 
     @staticmethod
-    def from_dict(data: Dict[str, Any]) -> "StackDetectionSettings":
+    def from_dict(data: Dict[str, Any]) -> StackDetectionSettings:
         return StackDetectionSettings(
             mode=data.get("mode", "auto"),
             fixed_stack_size=int(data.get("fixed_stack_size", 0)),

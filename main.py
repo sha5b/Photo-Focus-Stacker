@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
 
 # Context: Application entry point for Photo Focus Stacker
-# Purpose: Launch the PyQt5 GUI main window.
-# Notes: The UI is implemented in `src.ui.main_window`.
+# Purpose: Launch the GUI through the shared CLI entry point.
+# Notes: Environment preparation must happen before importing PyQt5.
 
-import sys
-
-from PyQt5.QtWidgets import QApplication
-
-from src.ui.main_window import MainWindow
-
-
-def main() -> int:
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    return int(app.exec_())
+from src.cli import main
 
 
 if __name__ == "__main__":

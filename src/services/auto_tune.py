@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from src.config.stacking_settings import StackerSettings
+from src.core import utils
 
 
 @dataclass(frozen=True)
@@ -24,9 +25,21 @@ class AutoTuneReport:
 
 
 def _load_gray_preview(path: str, max_dim: int = 640) -> Optional[np.ndarray]:
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None:
-        return None
+        try:
+            rgb = utils.load_image(path)
+            img = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+        except (OSError, ValueError):
+            return None
+    elif img.ndim == 3:
+        conversion = cv2.COLOR_BGRA2GRAY if img.shape[2] == 4 else cv2.COLOR_BGR2GRAY
+        img = cv2.cvtColor(img, conversion)
+
+    if img.dtype != np.uint8:
+        values = img.astype(np.float32)
+        lo, hi = np.percentile(values, (0.5, 99.5))
+        img = np.rint(np.clip((values - lo) / max(float(hi - lo), 1e-10), 0.0, 1.0) * 255.0).astype(np.uint8)
 
     h, w = img.shape[:2]
     scale = 1.0
@@ -56,7 +69,12 @@ def _estimate_motion_ratio(img_a_u8: np.ndarray, img_b_u8: np.ndarray) -> float:
         b = b[:h, :w]
 
     try:
-        shift, _response = cv2.phaseCorrelate(a, b)
+        # Gradients are much less sensitive to focus-dependent low-frequency changes.
+        a = cv2.Laplacian(a, cv2.CV_32F)
+        b = cv2.Laplacian(b, cv2.CV_32F)
+        shift, response = cv2.phaseCorrelate(a, b)
+        if not np.isfinite(response) or response < 0.10:
+            return 0.0
         shift_mag = float(np.hypot(shift[0], shift[1]))
         denom = float(max(a.shape[0], a.shape[1], 1))
         return float(shift_mag / denom)
@@ -138,7 +156,7 @@ def recommend_stacker_settings(
 
     if blend_method is None:
         if len(image_paths) >= 4 and (contrast_std >= 0.06 or max_dim >= 1800):
-            blend_method = "laplacian_pyramid"
+            blend_method = "guided_weighted"
         else:
             blend_method = "weighted"
 
@@ -147,12 +165,13 @@ def recommend_stacker_settings(
         "laplacian_var",
         "tenengrad",
         "sml",
+        "multiscale",
     ):
         focus_measure_method = preferred_focus_measure_method
 
     if focus_measure_method is None:
-        if contrast_std < 0.05:
-            focus_measure_method = "tenengrad"
+        if max_dim >= 2200 or contrast_std < 0.05:
+            focus_measure_method = "multiscale"
         else:
             focus_measure_method = "laplacian_var"
 

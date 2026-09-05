@@ -7,6 +7,17 @@
 import cv2
 import numpy as np
 
+
+def _as_float_gray(img_gray):
+    """Convert to float32 on a 0..255 scale without quantizing high-bit-depth input."""
+    if np.issubdtype(img_gray.dtype, np.integer):
+        maximum = float(np.iinfo(img_gray.dtype).max)
+        return img_gray.astype(np.float32) * (255.0 / maximum)
+    result = np.nan_to_num(img_gray.astype(np.float32), nan=0.0, posinf=1.0, neginf=0.0)
+    if result.size and float(np.max(result)) <= 1.5:
+        result *= 255.0
+    return result
+
 # Only focus measure method: Laplacian Variance Map
 def measure_laplacian_variance_map(img_gray, window_size=7, normalize=True): # Defaulting window size to 7
     """
@@ -18,10 +29,7 @@ def measure_laplacian_variance_map(img_gray, window_size=7, normalize=True): # D
     @return: Focus map (float32 NumPy array [0, 1]), same HxW as input.
     """
     print(f"Calculating Laplacian variance map (window={window_size})...")
-    if img_gray.dtype != np.uint8:
-        img_gray_uint8 = (img_gray * 255).astype(np.uint8)
-    else:
-        img_gray_uint8 = img_gray
+    img_gray_uint8 = _as_float_gray(img_gray)
 
     # Ensure window size is odd
     window_size = window_size if window_size % 2 != 0 else window_size + 1
@@ -58,10 +66,7 @@ def measure_laplacian_variance_map(img_gray, window_size=7, normalize=True): # D
 
 def measure_tenengrad_map(img_gray, window_size=7, normalize=True):
     print(f"Calculating Tenengrad focus map (window={window_size})...")
-    if img_gray.dtype != np.uint8:
-        img_gray_uint8 = (img_gray * 255).astype(np.uint8)
-    else:
-        img_gray_uint8 = img_gray
+    img_gray_uint8 = _as_float_gray(img_gray)
 
     window_size = window_size if window_size % 2 != 0 else window_size + 1
 
@@ -88,10 +93,7 @@ def measure_tenengrad_map(img_gray, window_size=7, normalize=True):
 
 def measure_sml_map(img_gray, window_size=7, normalize=True):
     print(f"Calculating SML focus map (window={window_size})...")
-    if img_gray.dtype != np.uint8:
-        img_gray_uint8 = (img_gray * 255).astype(np.uint8)
-    else:
-        img_gray_uint8 = img_gray
+    img_gray_uint8 = _as_float_gray(img_gray)
 
     window_size = window_size if window_size % 2 != 0 else window_size + 1
 
@@ -115,3 +117,39 @@ def measure_sml_map(img_gray, window_size=7, normalize=True):
 
     print("SML focus map calculation complete.")
     return focus_map.astype(np.float32)
+
+
+def measure_multiscale_map(img_gray, window_size=7, normalize=True):
+    """Noise-tolerant multi-scale focus evidence for fine macro structures."""
+    if img_gray.dtype == np.uint8:
+        gray = img_gray.astype(np.float32) / 255.0
+    else:
+        gray = np.clip(img_gray.astype(np.float32), 0.0, 1.0)
+    window_size = max(3, int(window_size) | 1)
+    combined = np.zeros_like(gray, dtype=np.float32)
+    total_weight = 0.0
+
+    for sigma, scale_weight in ((0.0, 0.55), (1.0, 0.30), (2.0, 0.15)):
+        source = gray if sigma == 0.0 else cv2.GaussianBlur(gray, (0, 0), sigma, borderType=cv2.BORDER_REFLECT)
+        gx = cv2.Sobel(source, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(source, cv2.CV_32F, 0, 1, ksize=3)
+        lap = cv2.Laplacian(source, cv2.CV_32F, ksize=3)
+        evidence = gx * gx + gy * gy + 0.35 * lap * lap
+        local_window = max(3, int(round(window_size * (1.0 + sigma * 0.5))) | 1)
+        evidence = cv2.boxFilter(evidence, -1, (local_window, local_window),
+                                 normalize=True, borderType=cv2.BORDER_REFLECT)
+        if normalize:
+            scale = float(np.percentile(evidence, 99.5))
+            if scale > 1e-12:
+                evidence = np.clip(evidence / scale, 0.0, 1.0)
+        combined += evidence.astype(np.float32) * scale_weight
+        total_weight += scale_weight
+
+    combined /= max(total_weight, 1e-10)
+    # Remove isolated sensor-noise responses without widening real edges much.
+    combined = cv2.medianBlur(combined.astype(np.float32), 3)
+    if normalize:
+        maximum = float(np.max(combined))
+        if maximum > 0:
+            combined /= maximum
+    return np.maximum(combined, 0.0).astype(np.float32)

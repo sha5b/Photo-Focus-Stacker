@@ -1,216 +1,157 @@
 # Photo Focus Stacker
 
-Focus stacking GUI for microscopy/macro stacks (developed for the [OpenScan](https://openscan.eu) community).
+High-quality focus stacking for macro photography, microscopy, and per-view
+photogrammetry image stacks. The application includes a PyQt GUI and a headless
+command-line workflow.
 
-## Quick start
+## Highlights
+
+- Pyramid ECC registration with translation, Euclidean, affine, and optional
+  homography models.
+- Middle-frame reference, exposure-normalized registration, transform quality
+  checks, automatic fallback, and rejection of unreliable frames.
+- Real warp-validity masks: generated border pixels never participate in fusion.
+- Laplacian variance, Tenengrad, SML, and noise-tolerant multi-scale focus maps.
+- Spatially regularized focus-depth map and per-pixel confidence map.
+- Weighted, guided edge-aware, direct-map, Laplacian-pyramid, and luma/chroma
+  fusion modes.
+- Linear-light blending by default.
+- Robust linear-light exposure normalization across frames.
+- 8-bit and 16-bit input; 16-bit TIFF and PNG output.
+- ICC handling, compatible EXIF preservation, optional RAW input, and alignment
+  diagnostics.
+- Photogrammetry preset that constrains alignment geometry and preserves the
+  reference canvas.
+- File-change-aware, memory-budgeted intermediate cache.
+- Overlap-safe tiled full-resolution focus analysis for large images.
+- Configurable parallel focus-map workers.
+- Responsive cancellation and per-stack processing progress.
+
+## Install and run
+
+Python 3.9 or newer and [uv](https://docs.astral.sh/uv/) are recommended.
 
 ```bash
 uv sync
 uv run photostacker
 ```
 
-1. Click `Load Images`.
-2. Keep `Stack Detection = Auto` unless your naming needs `Fixed size` or `Regex`.
-3. Optionally enable `Auto Tune`.
-4. Choose:
-   - `Focus Measure`
-   - `Blending Method`
-5. Click `Process Stack`.
-
-Settings persist to `%APPDATA%/photo_focus_stacker_settings.json` (Windows).
-
-## Recommended settings
-
-### Best overall (quality)
-
-- **Alignment Pyramid Levels**: `4-5`
-- **Alignment Mask Threshold**: `8-12`
-- **Focus Window Size**: `5-7`
-- **Focus Measure**: `Tenengrad` (good in low-contrast / flat regions)
-- **Blend**: `Guided Weighted (Edge-Aware)` or `Luma Weighted + Chroma Pick (MFF)`
-- **Sharpen**: `0.0` (sharpen later if needed)
-
-### Fast preview
-
-- **Alignment Pyramid Levels**: `1-2`
-- **Focus Window Size**: `7`
-- **Focus Measure**: `Laplacian Variance`
-- **Blend**: `Direct Map Selection` (fastest, can artifact)
-
-### When results look noisy / haloed
-
-- Increase **Focus Window Size** (e.g. `9`)
-- Prefer **Guided Weighted** or **MFF** over **Direct Map**
-- Reduce **Sharpen** (keep `0.0` while tuning)
-
-## Parameter reference (what each setting means)
-
-### Alignment Pyramid Levels
-
-Controls Pyramid ECC alignment from coarse-to-fine.
-
-- **Higher (4-6)**
-  - More robust to larger shifts/rotations.
-  - Slower.
-- **Lower (1-2)**
-  - Faster.
-  - Can fail if the stack has motion.
-
-### Alignment Mask Threshold
-
-Controls how many pixels are used by ECC by building a gradient mask from the reference image.
-
-- **Lower value (stricter)**
-  - Uses only the strongest edges.
-  - More robust to noise, but can fail if the subject is low-texture.
-- **Higher value (more permissive)**
-  - Includes more pixels (weaker edges).
-  - Can help low-contrast scenes, but can be influenced by noise.
-
-### Focus Window Size
-
-Size of the local window used to aggregate the focus measure (odd numbers only).
-
-- **Smaller (3-5)**
-  - Sharper transitions, more detail.
-  - More sensitive to noise.
-- **Larger (7-11)**
-  - Smoother maps (less speckle).
-  - Can slightly soften fine focus boundaries.
-
-### Focus Measure
-
-- **Laplacian Variance** (`laplacian_var`)
-  - Very common and fast.
-  - Can underperform in flat/homogeneous regions.
-- **Tenengrad** (`tenengrad`)
-  - Uses gradient energy.
-  - Often better in low-contrast regions.
-- **SML** (`sml`)
-  - Sum-modified Laplacian (`|Lx|+|Ly|`).
-  - Often a good alternative to Laplacian variance on textured subjects.
-
-### Sharpening Strength
-
-Unsharp mask applied after blending.
-
-- **0.0**: recommended while tuning
-- **0.3-0.8**: mild sharpening
-- **> 1.0**: can create halos/noise
-
-### Blending Method
-
-- **Weighted Blending**
-  - Smooth, stable baseline.
-- **Guided Weighted (Edge-Aware)**
-  - Smooths weights in an edge-aware way (guided filter when available).
-  - Good general-purpose “quality” option.
-- **Direct Map Selection**
-  - Chooses sharpest frame per pixel (plus top-2 confidence blending in ambiguous areas).
-  - Can produce artifacts if focus maps are noisy.
-- **Laplacian Pyramid Fusion**
-  - Multi-scale fusion; helps preserve detail at multiple scales.
-- **Luma Weighted + Chroma Pick (MFF)**
-  - Fuses luminance smoothly and selects/blends chroma from the sharpest frames.
-  - Often reduces color seams/halos.
-
-## Best / worst setting combinations
-
-### Best starting points
-
-- **General quality**
-  - Levels `4`
-  - Mask `8-12`
-  - Window `5-7`
-  - Focus `Tenengrad`
-  - Blend `Guided Weighted` or `MFF`
-  - Sharpen `0.0`
-
-- **Low-texture subjects**
-  - Focus `Tenengrad`
-  - Mask threshold slightly higher (more permissive)
-  - Blend `Guided Weighted` or `MFF`
-
-### Common “bad” combos
-
-- **Direct Map + small window (3–5)**
-  - Noisy focus maps turn into pixel-level artifacts.
-
-- **High sharpening + any artifacts**
-  - Sharpening amplifies halos/noise. Tune sharpening last.
-
-- **Very low alignment levels (1) with motion**
-  - Misalignment creates ghosting/blur no blend can fix.
-
-## Methods (what each option does)
-
-### Focus Measure
-
-- **Laplacian Variance**: local variance of Laplacian in a window.
-- **Tenengrad**: local average of gradient energy `(Gx^2 + Gy^2)`.
-- **SML**: sum-modified Laplacian `|Lx| + |Ly|` averaged in a window.
-
-For speed, focus maps are computed on a downscaled grayscale image for large inputs and upsampled back.
-
-### Blending Method
-
-- **Weighted Blending**: soft weights from focus maps.
-- **Guided Weighted (Edge-Aware)**: weight maps are edge-aware smoothed (guided/bilateral) before blending.
-- **Direct Map Selection**: picks the sharpest source per pixel, with a top-2 confidence blend in ambiguous regions.
-- **Laplacian Pyramid Fusion**: multi-scale fusion using Laplacian pyramids.
-- **Luma Weighted + Chroma Pick (MFF)**: fuse luminance smoothly and select/blend chroma from the sharpest frames (reduces color seams).
-
-### Performance note (caching)
-
-Alignment (ECC) is the slowest stage. The stacker caches `aligned_images` + `focus_maps` (bounded) so rerunning the same stack with the same alignment/focus settings can reuse intermediates.
-
-## The math / pipeline (high level)
-
-For each stack:
-
-1. **Load** RGB images as float32 `[0,1]`.
-2. **Align** each frame to the first frame using pyramid ECC.
-
-   We estimate a transform by maximizing the Enhanced Correlation Coefficient (ECC) objective between the reference and moving image (at multiple resolutions). A gradient-based mask is used to emphasize informative pixels.
-
-   - Primary model: homography `H` (3x3)
-   - Fallback model: affine (2x3) if homography ECC fails
-
-3. **Compute a focus map** per aligned frame.
-
-   Each focus measure returns a non-negative field `f_i(x)`:
-
-   - Laplacian variance: `Var(ΔI)` in a local window
-   - Tenengrad: local mean of `Gx^2 + Gy^2`
-   - SML: local mean of `|Lx| + |Ly|`
-
-4. **Convert focus maps to weights**.
-
-   For weight-based blends we use a stable per-pixel softmax:
-
-   `w_i(x) = exp(beta * f_i(x)) / sum_j exp(beta * f_j(x))`
-
-   This avoids hard seams and keeps weights normalized.
-
-5. **Blend** using the selected method.
-
-   - Weighted / Guided Weighted: `I(x) = sum_i w_i(x) * I_i(x)`
-   - Direct Map: choose argmax focus index (with top-2 confidence mixing in ambiguous areas)
-   - Laplacian Pyramid: multi-scale fusion of Laplacian pyramids with Gaussian pyramids of weights
-   - MFF (luma/chroma): fuse luminance with weights and pick/blend chroma from sharpest frames
-
-6. Optional **unsharp mask** sharpening.
-
-## Install
-
-Python 3.9+.
+For tests or RAW camera files:
 
 ```bash
-git clone https://github.com/sha5b/Photo-Focus-Stacker.git
-cd Photo-Focus-Stacker
-uv sync
-uv run photostacker
+uv sync --extra test
+uv sync --extra raw
+uv run pytest
 ```
+
+The project intentionally uses `opencv-contrib-python-headless`: PyQt5 owns the
+GUI, and installing a non-headless OpenCV wheel alongside it can redirect Qt to
+OpenCV's incompatible `xcb` plugin. On a GNOME Wayland session the launcher
+selects Qt's Wayland backend automatically; an explicit `QT_QPA_PLATFORM` value
+is always respected.
+
+RAW support uses `rawpy` and covers common DNG, NEF, CR2/CR3, ARW, ORF, RW2,
+and RAF files. RAW development uses camera white balance, disables automatic
+brightening, and emits 16-bit RGB working data.
+
+## GUI workflow
+
+1. Load at least two images from one or more focus stacks.
+2. Use automatic stack detection, a fixed stack size, or a custom regular
+   expression.
+3. Choose a preset.
+4. Select TIFF or PNG with 16-bit output for maximum quality.
+5. Optionally export depth, confidence, and alignment diagnostics.
+6. Process the stack and inspect the result preview.
+
+Unreliable frames are excluded. If fewer than two frames survive alignment,
+processing stops with an explicit error instead of silently blending an
+unaligned image.
+
+## Presets
+
+### Best Quality
+
+- Full-resolution multi-scale focus analysis
+- Five-level affine ECC registration
+- Guided edge-aware fusion
+- Linear-light blending
+- Common-valid-area crop
+
+### Photogrammetry
+
+- Euclidean registration only: translation, rotation, and uniform scale
+- Full-resolution multi-scale focus analysis
+- Guided edge-aware fusion in linear light
+- Reference-frame canvas is preserved
+- No projective homography or automatic crop
+
+Use one focus stack per camera pose. All poses should use the same preset,
+exposure treatment, output dimensions, and naming convention. Exporting the
+alignment report is recommended so rejected frames can be audited.
+
+### Balanced
+
+- 2000-pixel focus-analysis limit
+- Three-level affine alignment
+- Weighted fusion
+
+### Fast Preview
+
+- 1200-pixel focus-analysis limit
+- One-level alignment
+- Direct-map fusion
+- Linear-light conversion disabled
+
+## Command line
+
+When image paths are supplied, `photostacker` runs without launching the GUI:
+
+```bash
+uv run photostacker frame_001.tif frame_002.tif frame_003.tif \
+  --preset quality --bit-depth 16 --export-maps \
+  --output stacked.tif
+```
+
+For photogrammetry:
+
+```bash
+uv run photostacker pose07_focus_*.tif \
+  --preset photogrammetry --bit-depth 16 --export-maps \
+  --output pose07_stacked.tif
+```
+
+The shell expansion order becomes the focus-depth order. Use zero-padded frame
+numbers or explicitly provide the paths in focus order.
+
+## Output files
+
+- `name.tif`, `name.png`, or `name.jpg`: rendered stack
+- `name_depth.png`: exact zero-based source-frame index, stored as uint16
+- `name_confidence.png`: normalized focus confidence, stored as uint16
+- `name_alignment.json`: accepted/rejected status, transform model, ECC
+  matrix, correlation, and valid overlap for every source frame
+
+JPEG is always 8-bit. TIFF and PNG default to 16-bit. TIFF supports embedded ICC
+profiles; 16-bit PNG output receives a standards-compliant iCCP chunk. JPEG and
+8-bit Pillow outputs preserve compatible EXIF metadata from the reference frame,
+with EXIF orientation removed after pixels have been normalized.
+
+## Important controls
+
+- **Alignment model**: affine is the general macro default. Euclidean is safer
+  when downstream camera geometry matters. Homography is intended only for
+  stacks that genuinely require projective correction.
+- **Alignment mask threshold**: lower values retain only stronger edges; higher
+  values include more low-contrast structure.
+- **Focus analysis max dimension**: zero means full resolution. A limit trades
+  small-detail accuracy for speed.
+- **Focus window size**: smaller windows preserve narrow details; larger windows
+  reduce speckle.
+- **Cache memory limit**: oversized stacks are not cached. Set zero to disable
+  intermediate caching completely.
+- **Crop to common valid area**: removes warp borders. Photogrammetry mode keeps
+  the canvas fixed and uses validity-weighted filling instead.
 
 ## Python API
 
@@ -218,31 +159,49 @@ uv run photostacker
 from src.core.focus_stacker import FocusStacker
 
 stacker = FocusStacker(
-    num_pyramid_levels=4,
-    gradient_threshold=10,
-    focus_window_size=7,
-    focus_measure_method="tenengrad",
+    num_pyramid_levels=5,
+    alignment_model="affine",
+    focus_measure_method="multiscale",
     blend_method="guided_weighted",
-    sharpen_strength=0.0,
+    focus_analysis_max_dim=0,
+    crop_to_common_area=True,
+    linear_light_blending=True,
+    cache_memory_limit_mb=512,
 )
 
-result = stacker.process_stack(["img0.jpg", "img1.jpg", "img2.jpg"], color_space="sRGB")
+result = stacker.process_stack(["frame_001.tif", "frame_002.tif"])
+stacker.save_image(result, "stacked.tif", format="TIFF", bit_depth=16)
+
+# Available after processing:
+depth = stacker.depth_map
+confidence = stacker.confidence_map
+diagnostics = stacker.alignment_diagnostics
 ```
 
-### `FocusStacker` options
+## Quality recommendations
 
-- `num_pyramid_levels`: 1–6
-- `gradient_threshold`: 1–100
-- `focus_window_size`: 3–21 (odd)
-- `focus_measure_method`: `"laplacian_var" | "tenengrad" | "sml"`
-- `blend_method`:
-  - `"weighted"`
-  - `"guided_weighted"`
-  - `"direct_map"`
-  - `"laplacian_pyramid"`
-  - `"luma_weighted_chroma_pick"`
-- `sharpen_strength`: 0.0–3.0
+- Capture RAW or 16-bit TIFF when possible.
+- Lock exposure, white balance, ISO, and lighting across a stack.
+- Move focus in one direction with adequate overlap between focus planes.
+- Keep sharpening at zero until alignment and depth selection look correct.
+- Inspect confidence and alignment output before feeding images into a
+  photogrammetry reconstruction.
+- Homography can hide capture movement by distorting geometry; use it only when
+  the output is not expected to retain a calibrated camera model.
+
+## Development checks
+
+```bash
+uv sync --extra test
+uv run pytest -q
+uv run python -m compileall -q src main.py
+```
+
+The tests cover every blend path, the former Direct Map crash, regularized depth
+selection, alignment validation and masks, natural stack grouping, 16-bit TIFF
+round trips, metadata behavior, color-transfer round trips, and a complete
+focus-stacking pipeline.
 
 ## License
 
-Non-Commercial Open Source License (NCOSL). See `LICENSE`.
+Non-Commercial Open Source License (NCOSL). See [LICENSE](LICENSE).
